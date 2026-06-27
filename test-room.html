@@ -4,6 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>NEAR Saboteur - Room Test</title>
+  <!-- Server apni khud ki socket.io client library deta hai is path pe -->
   <script src="/socket.io/socket.io.js"></script>
   <style>
     body { font-family: sans-serif; background: #111; color: #eee; padding: 16px; }
@@ -21,6 +22,7 @@
 <body>
   <h2>🧪 NEAR Saboteur - Room Test</h2>
 
+  <!-- Apna server ka URL yahan daalo -->
   <input id="serverUrl" value="https://near-saboteur-backend.onrender.com" placeholder="Server URL" />
   <button onclick="connectServer()">1. Connect to Server</button>
 
@@ -62,6 +64,18 @@
     <div id="chatMessages" style="background:#000; padding:8px; height:150px; overflow-y:scroll; font-size:13px;"></div>
     <input id="chatInput" placeholder="Message type karo..." />
     <button onclick="sendChat()" style="background:#37a;">Send</button>
+    <button onclick="goToVoting()" style="background:#c70;">Go to Voting →</button>
+  </div>
+
+  <div id="votingBox" style="display:none; margin-top:8px;">
+    <h3>🗳️ Voting</h3>
+    <div id="voteTargets"></div>
+    <button onclick="castVote(null)" style="background:#666;">Skip Vote</button>
+    <p id="voteCount" style="font-size:13px; color:#888;"></p>
+  </div>
+
+  <div id="resultBox" style="display:none; margin-top:8px; background:#222; padding:10px; border-radius:8px;">
+    <h3 id="resultText"></h3>
   </div>
 
   <h3>Log:</h3>
@@ -178,12 +192,47 @@
           </div>`;
           div.scrollTop = div.scrollHeight;
         });
+
+        socket.on("voteUpdate", (data) => {
+          log("🗳️ Votes: " + data.totalVotes + "/" + data.totalAlive);
+          document.getElementById("voteCount").innerText =
+            "Votes cast: " + data.totalVotes + " / " + data.totalAlive;
+        });
+
+        socket.on("voteError", (data) => {
+          log("⚠️ Vote error: " + data.message);
+        });
+
+        socket.on("votingResult", (data) => {
+          document.getElementById("chatBox").style.display = "none";
+          document.getElementById("votingBox").style.display = "none";
+          document.getElementById("meetingBanner").style.display = "none";
+          const box = document.getElementById("resultBox");
+          box.style.display = "block";
+          if (data.tie) {
+            document.getElementById("resultText").innerText = "⚖️ Tie - koi eliminate nahi hua";
+            log("⚖️ Result: Tie, no one eliminated");
+          } else if (data.eliminatedId) {
+            document.getElementById("resultText").innerText =
+              "💀 " + data.eliminatedName + " eliminated hua!";
+            log("💀 Result: " + data.eliminatedName + " eliminated");
+            if (data.eliminatedId === socket.id) {
+              document.getElementById("aliveStatus").innerText = "DEAD 💀 (voted out)";
+            }
+          } else {
+            document.getElementById("resultText").innerText = "🤷 Skip - koi eliminate nahi hua";
+            log("🤷 Result: Skipped, no one eliminated");
+          }
+        });
       } catch (e) {
         log("🔥 JS Error: " + e.message);
       }
     }
 
+    let currentPlayers = [];
+
     function renderPlayers(players) {
+      currentPlayers = players;
       const div = document.getElementById("players");
       div.innerHTML = "";
       players.forEach((p) => {
@@ -212,10 +261,11 @@
       socket.emit("startGame", { imposterCount: 1 });
     }
 
+    // ---- Movement test logic ----
     const moveArea = document.getElementById("moveArea");
     const myDot = document.getElementById("myDot");
     const otherDotsDiv = document.getElementById("otherDots");
-    const otherDots = {};
+    const otherDots = {}; // socket.id -> dot element
 
     function moveMyDotTo(clientX, clientY) {
       const rect = moveArea.getBoundingClientRect();
@@ -254,6 +304,8 @@
         otherDotsDiv.appendChild(dot);
         otherDots[id] = dot;
       }
+      // moveArea ke andar dot ko absolute position karna hai, lekin woh
+      // alag div mein hai - isliye moveArea ke top-left ke relative offset use karte hain
       const rect = moveArea.getBoundingClientRect();
       dot.style.position = "fixed";
       dot.style.left = (rect.left + x) + "px";
@@ -285,6 +337,29 @@
       if (!text.trim()) return;
       socket.emit("sendChatMessage", { text });
       input.value = "";
+    }
+
+    function goToVoting() {
+      document.getElementById("chatBox").style.display = "none";
+      const votingBox = document.getElementById("votingBox");
+      votingBox.style.display = "block";
+      const targetsDiv = document.getElementById("voteTargets");
+      targetsDiv.innerHTML = "";
+      currentPlayers.forEach((p) => {
+        if (p.id === socket.id) return; // khud ko vote nahi kar sakte test mein simplicity ke liye
+        const btn = document.createElement("button");
+        btn.innerText = "Vote: " + p.name;
+        btn.style.background = "#a33";
+        btn.onclick = () => castVote(p.id);
+        targetsDiv.appendChild(btn);
+      });
+      log("🗳️ Voting screen khula.");
+    }
+
+    function castVote(targetId) {
+      if (!socket) { log("⚠️ Pehle connect karo!"); return; }
+      log("🗳️ Vote diya: " + (targetId ? targetId.slice(0, 5) : "SKIP"));
+      socket.emit("castVote", { targetId });
     }
   </script>
 </body>
