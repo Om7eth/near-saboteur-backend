@@ -173,6 +173,26 @@ io.on("connection", (socket) => {
     console.log(`Game started in room ${roomCode}. ${saboteurCount} saboteur(s) assigned.`);
   });
 
+  // ---- PLAYER MOVE (position sync) ----
+  // Client bhejta hai: { x, y } - har thodi der mein (e.g. 10x per second)
+  // [MULTIPLAYER: PER-PLAYER] - apni position bhejta hai, server room ke
+  // baaki sab players ko (khud ko chhodke) forward karta hai broadcast se.
+  socket.on("playerMove", ({ x, y }) => {
+    const roomCode = socket.data.roomCode;
+    if (!roomCode || !rooms[roomCode]) return;
+
+    // Room mein position bhi save kar lete hain (naya player join kare to
+    // usko sabki current position pata chal sake)
+    if (rooms[roomCode].players[socket.id]) {
+      rooms[roomCode].players[socket.id].x = x;
+      rooms[roomCode].players[socket.id].y = y;
+    }
+
+    // socket.to() use kiya hai (io.to() nahi) - isse khud ko message
+    // wapas nahi aata, sirf baaki players ko jaata hai. Bandwidth bachata hai.
+    socket.to(roomCode).emit("playerMoved", { id: socket.id, x, y });
+  });
+
   // ---- DISCONNECT ----
   socket.on("disconnect", () => {
     console.log("Player disconnected:", socket.id);
