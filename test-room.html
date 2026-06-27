@@ -42,10 +42,12 @@
   <div id="players"></div>
 
   <h3>🕹️ Movement Test (yahan tap/drag karo)</h3>
+  <p style="font-size:12px; color:#888;">Agar Saboteur ho: doosre player ki dot (laal) pe tap karke kill try karo.</p>
   <div id="moveArea">
     <div id="myDot"></div>
   </div>
   <div id="otherDots"></div>
+  <h3>Status: <span id="aliveStatus">Alive</span></h3>
 
   <h3>Log:</h3>
   <div id="log"></div>
@@ -109,6 +111,23 @@
 
         socket.on("playerMoved", (data) => {
           showOtherDot(data.id, data.x, data.y);
+        });
+
+        socket.on("playerKilled", (data) => {
+          if (data.targetId === socket.id) {
+            log("💀 Tum mar gaye! Killer: " + data.killerId.slice(0, 5));
+            document.getElementById("aliveStatus").innerText = "DEAD 💀";
+            myDot.style.opacity = "0.3";
+          } else {
+            log("☠️ Player " + data.targetId.slice(0, 5) + " mara gaya.");
+            if (otherDots[data.targetId]) {
+              otherDots[data.targetId].style.opacity = "0.3";
+            }
+          }
+        });
+
+        socket.on("killError", (data) => {
+          log("⚠️ Kill error: " + data.message);
         });
       } catch (e) {
         log("🔥 JS Error: " + e.message);
@@ -182,6 +201,8 @@
         dot = document.createElement("div");
         dot.className = "dot otherDot";
         dot.innerText = id.slice(0, 3);
+        dot.style.cursor = "pointer";
+        dot.addEventListener("click", () => tryKill(id));
         otherDotsDiv.appendChild(dot);
         otherDots[id] = dot;
       }
@@ -191,6 +212,12 @@
       dot.style.position = "fixed";
       dot.style.left = (rect.left + x) + "px";
       dot.style.top = (rect.top + y) + "px";
+    }
+
+    function tryKill(targetId) {
+      if (!socket) { log("⚠️ Pehle connect karo!"); return; }
+      log("🔪 Kill try kar rahe ho: " + targetId.slice(0, 5));
+      socket.emit("killPlayer", { targetId });
     }
   </script>
 </body>
