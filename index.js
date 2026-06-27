@@ -76,6 +76,7 @@ io.on("connection", (socket) => {
 
     rooms[code] = {
       code,
+      gameStarted: false,
       players: {
         [socket.id]: { name, avatarId, isHost: true },
       },
@@ -119,6 +120,57 @@ io.on("connection", (socket) => {
     io.to(roomCode).emit("playerListUpdated", { players: playerList });
 
     console.log(`${name} joined room ${roomCode}`);
+  });
+
+  // ---- START GAME (sirf host kar sakta hai) ----
+  // Client bhejta hai: { imposterCount }
+  // Yeh secretly random player(s) ko Saboteur banata hai.
+  // [MULTIPLAYER: SHARED] - role decide server pe hota hai, kisi client ko
+  // doosre player ka role pata nahi chalta, sirf apna khud ka.
+  socket.on("startGame", ({ imposterCount }) => {
+    const roomCode = socket.data.roomCode;
+    const room = rooms[roomCode];
+
+    if (!room) {
+      socket.emit("startGameError", { message: "Room not found." });
+      return;
+    }
+
+    // Sirf host start kar sakta hai
+    if (!room.players[socket.id] || !room.players[socket.id].isHost) {
+      socket.emit("startGameError", { message: "Sirf host hi game start kar sakta hai." });
+      return;
+    }
+
+    const playerIds = Object.keys(room.players);
+
+    if (playerIds.length < 2) {
+      socket.emit("startGameError", { message: "Kam se kam 2 players chahiye." });
+      return;
+    }
+
+    // imposterCount ko valid range mein clamp karna (kam se kam 1, players se zyada nahi)
+    let saboteurCount = imposterCount || 1;
+    saboteurCount = Math.max(1, Math.min(saboteurCount, playerIds.length - 1));
+
+    // Players ko shuffle karke pehle N ko Saboteur banana (Fisher-Yates shuffle)
+    const shuffled = [...playerIds];
+    for (let i = shuffled.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+    }
+    const saboteurIds = new Set(shuffled.slice(0, saboteurCount));
+
+    room.gameStarted = true;
+
+    // Har player ko SIRF apna role bhejna - kisi ko doosre ka role nahi pata chalega
+    playerIds.forEach((id) => {
+      const role = saboteurIds.has(id) ? "saboteur" : "crewmate";
+      room.players[id].role = role;
+      io.to(id).emit("roleAssigned", { role });
+    });
+
+    console.log(`Game started in room ${roomCode}. ${saboteurCount} saboteur(s) assigned.`);
   });
 
   // ---- DISCONNECT ----
