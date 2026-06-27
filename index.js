@@ -167,6 +167,7 @@ io.on("connection", (socket) => {
     playerIds.forEach((id) => {
       const role = saboteurIds.has(id) ? "saboteur" : "crewmate";
       room.players[id].role = role;
+      room.players[id].alive = true;
       io.to(id).emit("roleAssigned", { role });
     });
 
@@ -191,6 +192,49 @@ io.on("connection", (socket) => {
     // socket.to() use kiya hai (io.to() nahi) - isse khud ko message
     // wapas nahi aata, sirf baaki players ko jaata hai. Bandwidth bachata hai.
     socket.to(roomCode).emit("playerMoved", { id: socket.id, x, y });
+  });
+
+  // ---- KILL PLAYER (sirf Saboteur kar sakta hai) ----
+  // Client bhejta hai: { targetId } - jis player ko maara
+  // [MULTIPLAYER: SHARED] - SERVER VALIDATES ki killer sach mein Saboteur hai
+  // aur dono (killer + target) alive hain. Client ke "main Saboteur hoon" claim
+  // pe kabhi trust nahi karte - room.players[socket.id].role server pe stored hai.
+  socket.on("killPlayer", ({ targetId }) => {
+    const roomCode = socket.data.roomCode;
+    const room = rooms[roomCode];
+    if (!room) return;
+
+    const killer = room.players[socket.id];
+    const target = room.players[targetId];
+
+    // Security checks - server khud verify karta hai, client ko trust nahi karta
+    if (!killer || killer.role !== "saboteur") {
+      socket.emit("killError", { message: "Tum Saboteur nahi ho." });
+      return;
+    }
+    if (!killer.alive) {
+      socket.emit("killError", { message: "Tum khud mar chuke ho." });
+      return;
+    }
+    if (!target || !target.alive) {
+      socket.emit("killError", { message: "Target valid nahi hai." });
+      return;
+    }
+    if (target.role === "saboteur") {
+      socket.emit("killError", { message: "Saboteur doosre Saboteur ko nahi maar sakta." });
+      return;
+    }
+
+    target.alive = false;
+
+    // Sab players ko (Saboteur sahit) batana ki kaun mara - taaki sabki
+    // screen pe body/cutscene dikh sake. killerId bhi bhejte hain animation ke liye.
+    io.to(roomCode).emit("playerKilled", {
+      targetId,
+      killerId: socket.id,
+    });
+
+    console.log(`${target.name} was killed by ${killer.name} in room ${roomCode}`);
   });
 
   // ---- DISCONNECT ----
