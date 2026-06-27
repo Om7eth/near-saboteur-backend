@@ -237,6 +237,42 @@ io.on("connection", (socket) => {
     console.log(`${target.name} was killed by ${killer.name} in room ${roomCode}`);
   });
 
+  // ---- SABOTAGE ACTION (sirf Saboteur kar sakta hai) ----
+  // Client bhejta hai: { type } - "electricity" | "hacker" | "lockLeft" | "lockRight"
+  // [MULTIPLAYER: SHARED] - server validate karta hai role, phir sab players ko
+  // batata hai. Cooldown/timing logic abhi client-side hi rahegi (frontend
+  // mein already bana hua hai) - server sirf "yeh action hua" broadcast karta hai.
+  socket.on("sabotageAction", ({ type }) => {
+    const roomCode = socket.data.roomCode;
+    const room = rooms[roomCode];
+    if (!room) return;
+
+    const player = room.players[socket.id];
+
+    if (!player || player.role !== "saboteur") {
+      socket.emit("sabotageError", { message: "Tum Saboteur nahi ho." });
+      return;
+    }
+    if (!player.alive) {
+      socket.emit("sabotageError", { message: "Tum khud mar chuke ho." });
+      return;
+    }
+
+    const validTypes = ["electricity", "hacker", "lockLeft", "lockRight"];
+    if (!validTypes.includes(type)) {
+      socket.emit("sabotageError", { message: "Invalid sabotage type." });
+      return;
+    }
+
+    // Sab players ko batana (Saboteur sahit) ki sabotage trigger hua
+    io.to(roomCode).emit("sabotageTriggered", {
+      type,
+      triggeredBy: socket.id,
+    });
+
+    console.log(`Sabotage "${type}" triggered by ${player.name} in room ${roomCode}`);
+  });
+
   // ---- DISCONNECT ----
   socket.on("disconnect", () => {
     console.log("Player disconnected:", socket.id);
