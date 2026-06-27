@@ -139,7 +139,7 @@
         });
 
         socket.on("playerMoved", (data) => {
-          showOtherDot(data.id, data.x, data.y);
+          showOtherDot(data.id, data.x, data.y, data.isGhost);
         });
 
         socket.on("playerKilled", (data) => {
@@ -293,7 +293,7 @@
     });
     moveArea.addEventListener("mousedown", (e) => moveMyDotTo(e.clientX, e.clientY));
 
-    function showOtherDot(id, x, y) {
+    function showOtherDot(id, x, y, isGhost) {
       let dot = otherDots[id];
       if (!dot) {
         dot = document.createElement("div");
@@ -303,6 +303,10 @@
         dot.addEventListener("click", () => tryKill(id));
         otherDotsDiv.appendChild(dot);
         otherDots[id] = dot;
+      }
+      if (isGhost) {
+        dot.style.opacity = "0.4";
+        dot.innerText = "👻";
       }
       // moveArea ke andar dot ko absolute position karna hai, lekin woh
       // alag div mein hai - isliye moveArea ke top-left ke relative offset use karte hain
