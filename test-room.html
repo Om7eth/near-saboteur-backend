@@ -4,7 +4,8 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>NEAR Saboteur - Room Test</title>
-  <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+  <!-- Server apni khud ki socket.io client library deta hai is path pe -->
+  <script src="/socket.io/socket.io.js"></script>
   <style>
     body { font-family: sans-serif; background: #111; color: #eee; padding: 16px; }
     h2 { color: #7fdfff; }
@@ -46,37 +47,46 @@
     }
 
     function connectServer() {
-      const url = document.getElementById("serverUrl").value;
-      socket = io(url);
+      try {
+        log("⏳ Connecting...");
+        const url = document.getElementById("serverUrl").value;
+        socket = io(url);
 
-      socket.on("connect", () => {
-        log("✅ Connected to server! Socket ID: " + socket.id);
-      });
+        socket.on("connect", () => {
+          log("✅ Connected to server! Socket ID: " + socket.id);
+        });
 
-      socket.on("disconnect", () => {
-        log("❌ Disconnected from server.");
-      });
+        socket.on("connect_error", (err) => {
+          log("🔥 Connect error: " + err.message);
+        });
 
-      socket.on("roomCreated", (data) => {
-        log("🏠 Room created: " + data.code);
-        document.getElementById("roomCode").innerText = data.code;
-        renderPlayers(data.players);
-      });
+        socket.on("disconnect", () => {
+          log("❌ Disconnected from server.");
+        });
 
-      socket.on("roomJoined", (data) => {
-        log("🚪 Joined room: " + data.code);
-        document.getElementById("roomCode").innerText = data.code;
-        renderPlayers(data.players);
-      });
+        socket.on("roomCreated", (data) => {
+          log("🏠 Room created: " + data.code);
+          document.getElementById("roomCode").innerText = data.code;
+          renderPlayers(data.players);
+        });
 
-      socket.on("joinError", (data) => {
-        log("⚠️ Error: " + data.message);
-      });
+        socket.on("roomJoined", (data) => {
+          log("🚪 Joined room: " + data.code);
+          document.getElementById("roomCode").innerText = data.code;
+          renderPlayers(data.players);
+        });
 
-      socket.on("playerListUpdated", (data) => {
-        log("🔄 Player list updated. Total: " + data.players.length);
-        renderPlayers(data.players);
-      });
+        socket.on("joinError", (data) => {
+          log("⚠️ Error: " + data.message);
+        });
+
+        socket.on("playerListUpdated", (data) => {
+          log("🔄 Player list updated. Total: " + data.players.length);
+          renderPlayers(data.players);
+        });
+      } catch (e) {
+        log("🔥 JS Error: " + e.message);
+      }
     }
 
     function renderPlayers(players) {
