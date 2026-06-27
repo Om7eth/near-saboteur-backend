@@ -49,6 +49,13 @@
   <div id="otherDots"></div>
   <h3>Status: <span id="aliveStatus">Alive</span></h3>
 
+  <h3>⚡ Sabotage Test (Saboteur only)</h3>
+  <button onclick="sabotage('electricity')" style="background:#555;">Cut Electricity</button>
+  <button onclick="sabotage('hacker')" style="background:#555;">Trigger Hacker Attack</button>
+  <button onclick="sabotage('lockLeft')" style="background:#555;">Lock Gates Left</button>
+  <button onclick="sabotage('lockRight')" style="background:#555;">Lock Gates Right</button>
+  <div id="sabotageBanner" style="display:none; background:#a33; color:white; text-align:center; padding:10px; margin-top:8px; border-radius:6px; font-weight:bold;"></div>
+
   <h3>Log:</h3>
   <div id="log"></div>
 
@@ -128,6 +135,18 @@
 
         socket.on("killError", (data) => {
           log("⚠️ Kill error: " + data.message);
+        });
+
+        socket.on("sabotageTriggered", (data) => {
+          log("⚡ Sabotage: " + data.type + " (by " + data.triggeredBy.slice(0, 5) + ")");
+          const banner = document.getElementById("sabotageBanner");
+          banner.style.display = "block";
+          banner.innerText = "⚠️ SABOTAGE: " + data.type.toUpperCase();
+          setTimeout(() => { banner.style.display = "none"; }, 3000);
+        });
+
+        socket.on("sabotageError", (data) => {
+          log("⚠️ Sabotage error: " + data.message);
         });
       } catch (e) {
         log("🔥 JS Error: " + e.message);
@@ -218,6 +237,12 @@
       if (!socket) { log("⚠️ Pehle connect karo!"); return; }
       log("🔪 Kill try kar rahe ho: " + targetId.slice(0, 5));
       socket.emit("killPlayer", { targetId });
+    }
+
+    function sabotage(type) {
+      if (!socket) { log("⚠️ Pehle connect karo!"); return; }
+      log("⚡ Sabotage try kar rahe ho: " + type);
+      socket.emit("sabotageAction", { type });
     }
   </script>
 </body>
