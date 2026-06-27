@@ -4,7 +4,6 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>NEAR Saboteur - Room Test</title>
-  <!-- Server apni khud ki socket.io client library deta hai is path pe -->
   <script src="/socket.io/socket.io.js"></script>
   <style>
     body { font-family: sans-serif; background: #111; color: #eee; padding: 16px; }
@@ -22,7 +21,6 @@
 <body>
   <h2>🧪 NEAR Saboteur - Room Test</h2>
 
-  <!-- Apna server ka URL yahan daalo -->
   <input id="serverUrl" value="https://near-saboteur-backend.onrender.com" placeholder="Server URL" />
   <button onclick="connectServer()">1. Connect to Server</button>
 
@@ -55,6 +53,16 @@
   <button onclick="sabotage('lockLeft')" style="background:#555;">Lock Gates Left</button>
   <button onclick="sabotage('lockRight')" style="background:#555;">Lock Gates Right</button>
   <div id="sabotageBanner" style="display:none; background:#a33; color:white; text-align:center; padding:10px; margin-top:8px; border-radius:6px; font-weight:bold;"></div>
+
+  <h3>🚨 Meeting Test</h3>
+  <button onclick="callMeeting()" style="background:#c33;">Call Meeting</button>
+  <div id="meetingBanner" style="display:none; background:#933; color:white; text-align:center; padding:10px; margin-top:8px; border-radius:6px;"></div>
+
+  <div id="chatBox" style="display:none; margin-top:8px;">
+    <div id="chatMessages" style="background:#000; padding:8px; height:150px; overflow-y:scroll; font-size:13px;"></div>
+    <input id="chatInput" placeholder="Message type karo..." />
+    <button onclick="sendChat()" style="background:#37a;">Send</button>
+  </div>
 
   <h3>Log:</h3>
   <div id="log"></div>
@@ -148,6 +156,28 @@
         socket.on("sabotageError", (data) => {
           log("⚠️ Sabotage error: " + data.message);
         });
+
+        socket.on("meetingStarted", (data) => {
+          log("🚨 Meeting called by " + data.callerName + " (" + data.reason + ")");
+          const banner = document.getElementById("meetingBanner");
+          banner.style.display = "block";
+          banner.innerText = "🚨 MEETING CALLED BY " + data.callerName.toUpperCase();
+          document.getElementById("chatBox").style.display = "block";
+          document.getElementById("chatMessages").innerHTML = "";
+        });
+
+        socket.on("meetingError", (data) => {
+          log("⚠️ Meeting error: " + data.message);
+        });
+
+        socket.on("chatMessageReceived", (data) => {
+          const div = document.getElementById("chatMessages");
+          const isMe = data.senderId === socket.id;
+          div.innerHTML += `<div style="margin:4px 0; ${isMe ? 'text-align:right;' : ''}">
+            <b>${data.senderName}</b>: ${data.text}
+          </div>`;
+          div.scrollTop = div.scrollHeight;
+        });
       } catch (e) {
         log("🔥 JS Error: " + e.message);
       }
@@ -182,11 +212,10 @@
       socket.emit("startGame", { imposterCount: 1 });
     }
 
-    // ---- Movement test logic ----
     const moveArea = document.getElementById("moveArea");
     const myDot = document.getElementById("myDot");
     const otherDotsDiv = document.getElementById("otherDots");
-    const otherDots = {}; // socket.id -> dot element
+    const otherDots = {};
 
     function moveMyDotTo(clientX, clientY) {
       const rect = moveArea.getBoundingClientRect();
@@ -225,8 +254,6 @@
         otherDotsDiv.appendChild(dot);
         otherDots[id] = dot;
       }
-      // moveArea ke andar dot ko absolute position karna hai, lekin woh
-      // alag div mein hai - isliye moveArea ke top-left ke relative offset use karte hain
       const rect = moveArea.getBoundingClientRect();
       dot.style.position = "fixed";
       dot.style.left = (rect.left + x) + "px";
@@ -243,6 +270,21 @@
       if (!socket) { log("⚠️ Pehle connect karo!"); return; }
       log("⚡ Sabotage try kar rahe ho: " + type);
       socket.emit("sabotageAction", { type });
+    }
+
+    function callMeeting() {
+      if (!socket) { log("⚠️ Pehle connect karo!"); return; }
+      log("🚨 Meeting call kar rahe ho...");
+      socket.emit("callMeeting", { reason: "self" });
+    }
+
+    function sendChat() {
+      if (!socket) { log("⚠️ Pehle connect karo!"); return; }
+      const input = document.getElementById("chatInput");
+      const text = input.value;
+      if (!text.trim()) return;
+      socket.emit("sendChatMessage", { text });
+      input.value = "";
     }
   </script>
 </body>
