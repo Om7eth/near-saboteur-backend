@@ -224,20 +224,33 @@ io.on("connection", (socket) => {
   // Client bhejta hai: { x, y } - har thodi der mein (e.g. 10x per second)
   // [MULTIPLAYER: PER-PLAYER] - apni position bhejta hai, server room ke
   // baaki sab players ko (khud ko chhodke) forward karta hai broadcast se.
+  // [GHOST RULE] - agar bheजने wala player dead hai (ghost), uska movement
+  // SIRF doosre dead players (ghosts) ko dikhta hai. Alive players ke liye
+  // ghost ka movement bilkul broadcast nahi hota - woh unhe invisible hai.
   socket.on("playerMove", ({ x, y }) => {
     const roomCode = socket.data.roomCode;
-    if (!roomCode || !rooms[roomCode]) return;
+    const room = rooms[roomCode];
+    if (!roomCode || !room) return;
 
-    // Room mein position bhi save kar lete hain (naya player join kare to
-    // usko sabki current position pata chal sake)
-    if (rooms[roomCode].players[socket.id]) {
-      rooms[roomCode].players[socket.id].x = x;
-      rooms[roomCode].players[socket.id].y = y;
+    const sender = room.players[socket.id];
+    if (sender) {
+      sender.x = x;
+      sender.y = y;
     }
 
-    // socket.to() use kiya hai (io.to() nahi) - isse khud ko message
-    // wapas nahi aata, sirf baaki players ko jaata hai. Bandwidth bachata hai.
-    socket.to(roomCode).emit("playerMoved", { id: socket.id, x, y });
+    const isGhost = sender && sender.alive === false;
+
+    if (isGhost) {
+      // Sirf doosre dead players (ghosts) ko bhejna
+      Object.entries(room.players).forEach(([id, p]) => {
+        if (id !== socket.id && p.alive === false) {
+          io.to(id).emit("playerMoved", { id: socket.id, x, y, isGhost: true });
+        }
+      });
+    } else {
+      // Normal alive player - sabko bhejna (jaisa pehle se tha)
+      socket.to(roomCode).emit("playerMoved", { id: socket.id, x, y, isGhost: false });
+    }
   });
 
   // ---- KILL PLAYER (sirf Saboteur kar sakta hai) ----
@@ -369,6 +382,14 @@ io.on("connection", (socket) => {
 
     const sender = room.players[socket.id];
     if (!sender) return;
+
+    // [GHOST RULE] - dead players (ghosts) chat mein message nahi bhej sakte,
+    // sirf dekh sakte hain (read-only) - jo unhe already mil rahi hai kyuki
+    // chatMessageReceived sabko broadcast hota hai (io.to roomCode).
+    if (!sender.alive) {
+      socket.emit("chatError", { message: "Tum ghost ho, chat mein message nahi bhej sakte." });
+      return;
+    }
 
     const trimmed = (text || "").trim().slice(0, 200); // 200 char limit, spam-protection
     if (!trimmed) return;
