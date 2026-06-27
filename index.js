@@ -66,10 +66,8 @@ io.on("connection", (socket) => {
   console.log("Player connected:", socket.id);
 
   // ---- CREATE ROOM ----
-  // Client bhejta hai: { name, avatarId }
   socket.on("createRoom", ({ name, avatarId }) => {
     let code = generateRoomCode();
-    // Bahut hi kam chance hai collision ka, lekin safety ke liye check
     while (rooms[code]) {
       code = generateRoomCode();
     }
@@ -94,7 +92,6 @@ io.on("connection", (socket) => {
   });
 
   // ---- JOIN ROOM ----
-  // Client bhejta hai: { code, name, avatarId }
   socket.on("joinRoom", ({ code, name, avatarId }) => {
     const roomCode = (code || "").toUpperCase().trim();
     const room = rooms[roomCode];
@@ -110,23 +107,17 @@ io.on("connection", (socket) => {
 
     const playerList = getPlayerList(roomCode);
 
-    // Naye player ko khud confirmation
     socket.emit("roomJoined", {
       code: roomCode,
       players: playerList,
     });
 
-    // Room ke sabko updated player-list bhejna (naya player bhi dikhega sabko)
     io.to(roomCode).emit("playerListUpdated", { players: playerList });
 
     console.log(`${name} joined room ${roomCode}`);
   });
 
-  // ---- START GAME (sirf host kar sakta hai) ----
-  // Client bhejta hai: { imposterCount }
-  // Yeh secretly random player(s) ko Saboteur banata hai.
-  // [MULTIPLAYER: SHARED] - role decide server pe hota hai, kisi client ko
-  // doosre player ka role pata nahi chalta, sirf apna khud ka.
+  // ---- START GAME ----
   socket.on("startGame", ({ imposterCount }) => {
     const roomCode = socket.data.roomCode;
     const room = rooms[roomCode];
@@ -136,7 +127,6 @@ io.on("connection", (socket) => {
       return;
     }
 
-    // Sirf host start kar sakta hai
     if (!room.players[socket.id] || !room.players[socket.id].isHost) {
       socket.emit("startGameError", { message: "Sirf host hi game start kar sakta hai." });
       return;
@@ -149,11 +139,9 @@ io.on("connection", (socket) => {
       return;
     }
 
-    // imposterCount ko valid range mein clamp karna (kam se kam 1, players se zyada nahi)
     let saboteurCount = imposterCount || 1;
     saboteurCount = Math.max(1, Math.min(saboteurCount, playerIds.length - 1));
 
-    // Players ko shuffle karke pehle N ko Saboteur banana (Fisher-Yates shuffle)
     const shuffled = [...playerIds];
     for (let i = shuffled.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
@@ -163,7 +151,6 @@ io.on("connection", (socket) => {
 
     room.gameStarted = true;
 
-    // Har player ko SIRF apna role bhejna - kisi ko doosre ka role nahi pata chalega
     playerIds.forEach((id) => {
       const role = saboteurIds.has(id) ? "saboteur" : "crewmate";
       room.players[id].role = role;
@@ -174,31 +161,20 @@ io.on("connection", (socket) => {
     console.log(`Game started in room ${roomCode}. ${saboteurCount} saboteur(s) assigned.`);
   });
 
-  // ---- PLAYER MOVE (position sync) ----
-  // Client bhejta hai: { x, y } - har thodi der mein (e.g. 10x per second)
-  // [MULTIPLAYER: PER-PLAYER] - apni position bhejta hai, server room ke
-  // baaki sab players ko (khud ko chhodke) forward karta hai broadcast se.
+  // ---- PLAYER MOVE ----
   socket.on("playerMove", ({ x, y }) => {
     const roomCode = socket.data.roomCode;
     if (!roomCode || !rooms[roomCode]) return;
 
-    // Room mein position bhi save kar lete hain (naya player join kare to
-    // usko sabki current position pata chal sake)
     if (rooms[roomCode].players[socket.id]) {
       rooms[roomCode].players[socket.id].x = x;
       rooms[roomCode].players[socket.id].y = y;
     }
 
-    // socket.to() use kiya hai (io.to() nahi) - isse khud ko message
-    // wapas nahi aata, sirf baaki players ko jaata hai. Bandwidth bachata hai.
     socket.to(roomCode).emit("playerMoved", { id: socket.id, x, y });
   });
 
-  // ---- KILL PLAYER (sirf Saboteur kar sakta hai) ----
-  // Client bhejta hai: { targetId } - jis player ko maara
-  // [MULTIPLAYER: SHARED] - SERVER VALIDATES ki killer sach mein Saboteur hai
-  // aur dono (killer + target) alive hain. Client ke "main Saboteur hoon" claim
-  // pe kabhi trust nahi karte - room.players[socket.id].role server pe stored hai.
+  // ---- KILL PLAYER ----
   socket.on("killPlayer", ({ targetId }) => {
     const roomCode = socket.data.roomCode;
     const room = rooms[roomCode];
@@ -207,7 +183,6 @@ io.on("connection", (socket) => {
     const killer = room.players[socket.id];
     const target = room.players[targetId];
 
-    // Security checks - server khud verify karta hai, client ko trust nahi karta
     if (!killer || killer.role !== "saboteur") {
       socket.emit("killError", { message: "Tum Saboteur nahi ho." });
       return;
@@ -227,8 +202,6 @@ io.on("connection", (socket) => {
 
     target.alive = false;
 
-    // Sab players ko (Saboteur sahit) batana ki kaun mara - taaki sabki
-    // screen pe body/cutscene dikh sake. killerId bhi bhejte hain animation ke liye.
     io.to(roomCode).emit("playerKilled", {
       targetId,
       killerId: socket.id,
@@ -237,11 +210,7 @@ io.on("connection", (socket) => {
     console.log(`${target.name} was killed by ${killer.name} in room ${roomCode}`);
   });
 
-  // ---- SABOTAGE ACTION (sirf Saboteur kar sakta hai) ----
-  // Client bhejta hai: { type } - "electricity" | "hacker" | "lockLeft" | "lockRight"
-  // [MULTIPLAYER: SHARED] - server validate karta hai role, phir sab players ko
-  // batata hai. Cooldown/timing logic abhi client-side hi rahegi (frontend
-  // mein already bana hua hai) - server sirf "yeh action hua" broadcast karta hai.
+  // ---- SABOTAGE ACTION ----
   socket.on("sabotageAction", ({ type }) => {
     const roomCode = socket.data.roomCode;
     const room = rooms[roomCode];
@@ -264,13 +233,79 @@ io.on("connection", (socket) => {
       return;
     }
 
-    // Sab players ko batana (Saboteur sahit) ki sabotage trigger hua
     io.to(roomCode).emit("sabotageTriggered", {
       type,
       triggeredBy: socket.id,
     });
 
     console.log(`Sabotage "${type}" triggered by ${player.name} in room ${roomCode}`);
+  });
+
+  // ---- CALL MEETING (koi bhi alive player kar sakta hai) ----
+  // Client bhejta hai: { reason: 'self' | 'report', reportedBodyId }
+  // [MULTIPLAYER: SHARED] - meeting state room mein store hoti hai taaki
+  // naya/refresh hua player bhi current stage jaan sake.
+  socket.on("callMeeting", ({ reason, reportedBodyId }) => {
+    const roomCode = socket.data.roomCode;
+    const room = rooms[roomCode];
+    if (!room) return;
+
+    const caller = room.players[socket.id];
+    if (!caller || !caller.alive) {
+      socket.emit("meetingError", { message: "Tum meeting call nahi kar sakte." });
+      return;
+    }
+
+    if (room.meeting) {
+      socket.emit("meetingError", { message: "Meeting already chal rahi hai." });
+      return;
+    }
+
+    room.meeting = {
+      stage: "alarm",
+      startedAt: Date.now(),
+      calledBy: socket.id,
+      reason: reason || "self",
+      reportedBodyId: reportedBodyId || null,
+      messages: [],
+      votes: {},
+    };
+
+    io.to(roomCode).emit("meetingStarted", {
+      calledBy: socket.id,
+      callerName: caller.name,
+      reason: room.meeting.reason,
+    });
+
+    console.log(`Meeting called by ${caller.name} in room ${roomCode}`);
+  });
+
+  // ---- MEETING CHAT MESSAGE ----
+  // Client bhejta hai: { text }
+  // [MULTIPLAYER: SHARED] - sab players ke chat-history mein same messages
+  // dikhne chahiye, isliye server hi single-source-of-truth rakhta hai.
+  socket.on("sendChatMessage", ({ text }) => {
+    const roomCode = socket.data.roomCode;
+    const room = rooms[roomCode];
+    if (!room || !room.meeting) return;
+
+    const sender = room.players[socket.id];
+    if (!sender) return;
+
+    const trimmed = (text || "").trim().slice(0, 200);
+    if (!trimmed) return;
+
+    const message = {
+      senderId: socket.id,
+      senderName: sender.name,
+      senderAvatar: sender.avatarId,
+      text: trimmed,
+      timestamp: Date.now(),
+    };
+
+    room.meeting.messages.push(message);
+
+    io.to(roomCode).emit("chatMessageReceived", message);
   });
 
   // ---- DISCONNECT ----
@@ -283,11 +318,9 @@ io.on("connection", (socket) => {
 
       const remaining = Object.keys(rooms[roomCode].players);
       if (remaining.length === 0) {
-        // Room khaali ho gaya - hata do memory se
         delete rooms[roomCode];
         console.log(`Room ${roomCode} deleted (empty)`);
       } else {
-        // Baaki players ko update bhejna
         io.to(roomCode).emit("playerListUpdated", {
           players: getPlayerList(roomCode),
         });
