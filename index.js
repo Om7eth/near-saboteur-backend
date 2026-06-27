@@ -50,6 +50,17 @@ function generateRoomCode() {
   return code;
 }
 
+// [RECONNECTION] A random per-player token, given to the client once on
+// join/create and saved in their own localStorage. When a player's socket
+// drops (refresh, backgrounding the tab, brief network loss) and a new
+// socket connects later, this token is what lets the server recognize
+// "this is the same person coming back" rather than treating them as a
+// brand new player — since a fresh socket.id alone has no relation to
+// the one that disconnected.
+function generatePlayerToken() {
+  return Math.random().toString(36).slice(2) + Date.now().toString(36);
+}
+
 // Player list for a room, in a clean format for broadcasting
 function getPlayerList(roomCode) {
   const room = rooms[roomCode];
@@ -59,11 +70,68 @@ function getPlayerList(roomCode) {
     name: p.name,
     avatarId: p.avatarId,
     isHost: p.isHost,
+    // [SPAWN/RENDER FIX] Including last-known x/y/alive here means a
+    // newly-joined client immediately knows where every existing player
+    // currently is, instead of waiting for that player's next movement
+    // broadcast (which might be many seconds away if they're standing
+    // still) before they appear on screen at all.
+    x: p.x,
+    y: p.y,
+    alive: p.alive,
   }));
 }
 
 // Calculates the voting result and broadcasts it to everyone, then
 // clears the meeting state (so a new meeting can be called).
+// [WIN CONDITION] Checks both win conditions after every kill or
+// elimination and announces a winner the moment either is met:
+//   - Saboteur(s) win once alive crewmates drop to 2 or fewer (the
+//     standard Among Us threshold — at that point there's no way for
+//     crewmates to meaningfully investigate anymore).
+//   - Crewmates win once either the Saboteur is voted out, OR every
+//     alive crewmate has completed all of their assigned missions.
+// Returns true if a winner was found and announced (caller can use this
+// to skip any further game-state changes, like opening a new meeting).
+function checkWinCondition(roomCode) {
+  const room = rooms[roomCode];
+  if (!room || room.winner) return false; // already decided, don't re-announce
+
+  const players = Object.values(room.players);
+  const aliveCrewmates = players.filter((p) => p.role === "crewmate" && p.alive);
+  const aliveSaboteurs = players.filter((p) => p.role === "saboteur" && p.alive);
+
+  // Saboteur win: too few crewmates left alive relative to Saboteurs.
+  if (aliveCrewmates.length <= 2 && aliveCrewmates.length <= aliveSaboteurs.length) {
+    room.winner = "saboteur";
+    io.to(roomCode).emit("gameOver", { winner: "saboteur", reason: "elimination" });
+    console.log(`Room ${roomCode}: Saboteur(s) win by elimination`);
+    return true;
+  }
+
+  // Crewmate win #1: no Saboteurs left alive (all voted out / impossible
+  // here since Saboteurs can't be killed by each other, but a Saboteur
+  // CAN be voted out, which is the actual trigger for this branch).
+  if (aliveSaboteurs.length === 0 && players.some((p) => p.role === "saboteur")) {
+    room.winner = "crewmate";
+    io.to(roomCode).emit("gameOver", { winner: "crewmate", reason: "saboteurEjected" });
+    console.log(`Room ${roomCode}: Crewmates win - Saboteur ejected`);
+    return true;
+  }
+
+  // Crewmate win #2: every alive crewmate has finished every assigned
+  // mission. missionsTotal/missionsDone are tracked per-player via the
+  // reportMissionProgress event below, sent by each client as their own
+  // missions complete.
+  if (aliveCrewmates.length > 0 && aliveCrewmates.every((p) => p.missionsDone >= (p.missionsTotal || Infinity))) {
+    room.winner = "crewmate";
+    io.to(roomCode).emit("gameOver", { winner: "crewmate", reason: "missionsComplete" });
+    console.log(`Room ${roomCode}: Crewmates win - all missions complete`);
+    return true;
+  }
+
+  return false;
+}
+
 function finalizeVoting(roomCode) {
   const room = rooms[roomCode];
   if (!room || !room.meeting) return;
@@ -92,20 +160,44 @@ function finalizeVoting(roomCode) {
     eliminatedId = topChoices[0];
     if (room.players[eliminatedId]) {
       room.players[eliminatedId].alive = false;
+      // Voted-out players don't have a "killer" cutscene, but they do
+      // still leave a body for the corpse-cleanup logic to track and
+      // later clear (see CLEAR_BODY below).
+      room.players[eliminatedId].bodyX = room.players[eliminatedId].x;
+      room.players[eliminatedId].bodyY = room.players[eliminatedId].y;
     }
   }
+
+  // [BODY CLEANUP] Every player who was already dead BEFORE this voting
+  // round (i.e. everyone announced when the meeting started) has now
+  // been discussed and voted on — Among Us clears all known bodies once
+  // a meeting concludes, not just the one that got specifically reported.
+  // The newly-eliminated player (if any) is also included, since their
+  // body never needs to be found/reported again either.
+  const clearedBodyIds = Object.entries(room.players)
+    .filter(([, p]) => !p.alive)
+    .map(([id]) => id);
 
   io.to(roomCode).emit("votingResult", {
     eliminatedId,
     eliminatedName: eliminatedId ? room.players[eliminatedId]?.name : null,
     voteCounts: counts,
     tie: topChoices.length > 1,
+    clearedBodyIds,
   });
 
   console.log(`Voting result in room ${roomCode}: eliminated=${eliminatedId || "none"}`);
 
+  // No new meeting can be called within 30s of this one ending.
+  room.meetingCooldownUntil = Date.now() + 30000;
+
   // Meeting's over - clear the state so a new one can start
   delete room.meeting;
+
+  // [WIN CONDITION] A vote-out can end the game immediately, either by
+  // ejecting the last Saboteur (crewmates win) or by reducing crewmates
+  // below the threshold if a crewmate got voted out by mistake.
+  checkWinCondition(roomCode);
 }
 
 io.on("connection", (socket) => {
@@ -120,20 +212,24 @@ io.on("connection", (socket) => {
       code = generateRoomCode();
     }
 
+    const playerToken = generatePlayerToken();
+
     rooms[code] = {
       code,
       gameStarted: false,
       players: {
-        [socket.id]: { name, avatarId, isHost: true },
+        [socket.id]: { name, avatarId, isHost: true, playerToken },
       },
     };
 
     socket.join(code);
     socket.data.roomCode = code;
+    socket.data.playerToken = playerToken;
 
     socket.emit("roomCreated", {
       code,
       players: getPlayerList(code),
+      playerToken,
     });
 
     console.log(`Room ${code} created by ${name}`);
@@ -150,9 +246,11 @@ io.on("connection", (socket) => {
       return;
     }
 
-    room.players[socket.id] = { name, avatarId, isHost: false };
+    const playerToken = generatePlayerToken();
+    room.players[socket.id] = { name, avatarId, isHost: false, playerToken };
     socket.join(roomCode);
     socket.data.roomCode = roomCode;
+    socket.data.playerToken = playerToken;
 
     const playerList = getPlayerList(roomCode);
 
@@ -160,12 +258,65 @@ io.on("connection", (socket) => {
     socket.emit("roomJoined", {
       code: roomCode,
       players: playerList,
+      playerToken,
     });
 
     // Updated player-list to everyone in the room (new player shows up for everyone)
     io.to(roomCode).emit("playerListUpdated", { players: playerList });
 
     console.log(`${name} joined room ${roomCode}`);
+  });
+
+  // ---- RECONNECT TO ROOM ----
+  // Client sends: { code, playerToken } - sent automatically by a client
+  // that finds a saved roomCode+playerToken in its own localStorage on
+  // load, instead of going through createRoom/joinRoom again.
+  // [RECONNECTION] Re-attaches this NEW socket.id to the EXISTING player
+  // slot that was reserved when they disconnected (see the disconnect
+  // handler below) — same role, same alive-state, same everything, just a
+  // different underlying connection.
+  socket.on("reconnectToRoom", ({ code, playerToken }) => {
+    const roomCode = (code || "").toUpperCase().trim();
+    const room = rooms[roomCode];
+
+    if (!room) {
+      socket.emit("reconnectError", { message: "Room no longer exists." });
+      return;
+    }
+
+    // Find the player slot (under their OLD socket.id) matching this token
+    const oldId = Object.keys(room.players).find(
+      (id) => room.players[id].playerToken === playerToken
+    );
+
+    if (!oldId) {
+      socket.emit("reconnectError", { message: "Could not find your previous session." });
+      return;
+    }
+
+    const playerData = room.players[oldId];
+
+    // Move the player's data to the new socket.id, clear their
+    // disconnected-grace-period state, and clean up the old key.
+    delete playerData.disconnectedAt;
+    delete room.players[oldId];
+    room.players[socket.id] = playerData;
+
+    socket.join(roomCode);
+    socket.data.roomCode = roomCode;
+    socket.data.playerToken = playerToken;
+
+    socket.emit("reconnected", {
+      code: roomCode,
+      players: getPlayerList(roomCode),
+      role: playerData.role || null,
+      alive: playerData.alive !== false,
+      gameStarted: room.gameStarted || false,
+    });
+
+    io.to(roomCode).emit("playerListUpdated", { players: getPlayerList(roomCode) });
+
+    console.log(`${playerData.name} reconnected to room ${roomCode}`);
   });
 
   // ---- UPDATE PROFILE (name/avatar changed after already in a room) ----
@@ -230,13 +381,19 @@ io.on("connection", (socket) => {
     const saboteurIds = new Set(shuffled.slice(0, saboteurCount));
 
     room.gameStarted = true;
+    // No meeting can be called within the first 30s of the game starting.
+    room.meetingCooldownUntil = Date.now() + 30000;
 
-    // Send each player ONLY their own role - nobody learns another player's role
-    playerIds.forEach((id) => {
+    // Send each player ONLY their own role - nobody learns another player's role.
+    // [SPAWN FIX] Also assign each player a unique spawnIndex (just their
+    // position in playerIds, 0..N-1) so they each land on a different one
+    // of the cafeteria's predefined spawn points instead of everyone
+    // spawning on the exact same tile and getting stuck inside each other.
+    playerIds.forEach((id, spawnIndex) => {
       const role = saboteurIds.has(id) ? "saboteur" : "crewmate";
       room.players[id].role = role;
       room.players[id].alive = true;
-      io.to(id).emit("roleAssigned", { role });
+      io.to(id).emit("roleAssigned", { role, spawnIndex });
     });
 
     console.log(`Game started in room ${roomCode}. ${saboteurCount} saboteur(s) assigned.`);
@@ -322,207 +479,43 @@ io.on("connection", (socket) => {
       socket.emit("killError", { message: "The Saboteur cannot kill another Saboteur." });
       return;
     }
+    // Server-side cooldown enforcement (25s) - mirrors the client's own
+    // KILL_COOLDOWN_MS, but checked here too so a modified client can't
+    // bypass the cooldown by just not enforcing it locally.
+    const now = Date.now();
+    if (killer.killCooldownUntil && now < killer.killCooldownUntil) {
+      socket.emit("killError", { message: "Kill is still on cooldown." });
+      return;
+    }
+    killer.killCooldownUntil = now + 25000;
 
     target.alive = false;
+    // Store where the body fell — sent to everyone below (bodyDropped),
+    // but that event ONLY carries position/avatar data, never a
+    // notification or popup. Each client decides entirely on its own,
+    // locally, whether to show a Report button/popup based on whether
+    // THEIR OWN player is currently standing close to it — exactly the
+    // same proximity check (canReportBody/nearestReportableBody) already
+    // used elsewhere in the game. No other player's screen is ever told
+    // "someone found a body" by the server.
+    target.bodyX = target.x;
+    target.bodyY = target.y;
 
-    // Tell everyone (including the Saboteur) who died - so the
-    // body/cutscene shows up on everyone's screen. killerId is included
-    // too, for the animation.
-    io.to(roomCode).emit("playerKilled", {
-      targetId,
-      killerId: socket.id,
+    // [FAIRNESS FIX] Only the killer and the victim see the kill cutscene
+    // and learn about it right away — exactly like Among Us, nobody else
+    // in the room is told anything here.
+    io.to(socket.id).emit("playerKilled", { targetId, killerId: socket.id });
+    io.to(targetId).emit("playerKilled", { targetId, killerId: socket.id });
+
+    // Everyone else (and the killer/victim too) gets the body's raw
+    // position/avatar data so it can render on their map once they're
+    // close enough to see it for themselves — same as how any other
+    // player's position is just data, not an announcement.
+    socket.to(roomCode).emit("bodyDropped", {
+      bodyOwnerId: targetId,
+      x: target.bodyX,
+      y: target.bodyY,
+      avatarId: target.avatarId,
     });
 
-    console.log(`${target.name} was killed by ${killer.name} in room ${roomCode}`);
-  });
-
-  // ---- SABOTAGE ACTION (Saboteur only) ----
-  // Client sends: { type } - "electricity" | "hacker" | "lockLeft" | "lockRight"
-  // [MULTIPLAYER: SHARED] - server validates the role, then tells every
-  // player. Cooldown/timing logic still lives client-side (already built
-  // into the frontend) - the server just broadcasts "this action happened".
-  socket.on("sabotageAction", ({ type }) => {
-    const roomCode = socket.data.roomCode;
-    const room = rooms[roomCode];
-    if (!room) return;
-
-    const player = room.players[socket.id];
-
-    if (!player || player.role !== "saboteur") {
-      socket.emit("sabotageError", { message: "You are not the Saboteur." });
-      return;
-    }
-    if (!player.alive) {
-      socket.emit("sabotageError", { message: "You are already dead." });
-      return;
-    }
-
-    const validTypes = ["electricity", "hacker", "lockLeft", "lockRight"];
-    if (!validTypes.includes(type)) {
-      socket.emit("sabotageError", { message: "Invalid sabotage type." });
-      return;
-    }
-
-    // Tell everyone (including the Saboteur) that a sabotage was triggered
-    io.to(roomCode).emit("sabotageTriggered", {
-      type,
-      triggeredBy: socket.id,
-    });
-
-    console.log(`Sabotage "${type}" triggered by ${player.name} in room ${roomCode}`);
-  });
-
-  // ---- CALL MEETING (any alive player can do this) ----
-  // Client sends: { reason: 'self' | 'report', reportedBodyId }
-  // [MULTIPLAYER: SHARED] - meeting state is stored on the room so a
-  // new/refreshed player can also learn the current stage.
-  socket.on("callMeeting", ({ reason, reportedBodyId }) => {
-    const roomCode = socket.data.roomCode;
-    const room = rooms[roomCode];
-    if (!room) return;
-
-    const caller = room.players[socket.id];
-    if (!caller || !caller.alive) {
-      socket.emit("meetingError", { message: "You cannot call a meeting." });
-      return;
-    }
-
-    if (room.meeting) {
-      socket.emit("meetingError", { message: "A meeting is already in progress." });
-      return;
-    }
-
-    room.meeting = {
-      stage: "alarm",
-      startedAt: Date.now(),
-      calledBy: socket.id,
-      reason: reason || "self",
-      reportedBodyId: reportedBodyId || null,
-      messages: [],
-      votes: {},
-    };
-
-    io.to(roomCode).emit("meetingStarted", {
-      calledBy: socket.id,
-      callerName: caller.name,
-      reason: room.meeting.reason,
-    });
-
-    console.log(`Meeting called by ${caller.name} in room ${roomCode}`);
-  });
-
-  // ---- MEETING CHAT MESSAGE ----
-  // Client sends: { text }
-  // [MULTIPLAYER: SHARED] - every player's chat history should show the
-  // same messages, so the server is the single source of truth here.
-  socket.on("sendChatMessage", ({ text }) => {
-    const roomCode = socket.data.roomCode;
-    const room = rooms[roomCode];
-    if (!room || !room.meeting) return;
-
-    const sender = room.players[socket.id];
-    if (!sender) return;
-
-    // [GHOST RULE] - dead players (ghosts) can't send chat messages, only
-    // read them (which they already get, since chatMessageReceived is
-    // broadcast to the whole room via io.to(roomCode)).
-    if (!sender.alive) {
-      socket.emit("chatError", { message: "You are a ghost and cannot send chat messages." });
-      return;
-    }
-
-    const trimmed = (text || "").trim().slice(0, 200); // 200 char limit, spam-protection
-    if (!trimmed) return;
-
-    const message = {
-      senderId: socket.id,
-      senderName: sender.name,
-      senderAvatar: sender.avatarId,
-      text: trimmed,
-      timestamp: Date.now(),
-    };
-
-    room.meeting.messages.push(message);
-
-    io.to(roomCode).emit("chatMessageReceived", message);
-  });
-
-  // ---- CAST VOTE ----
-  // Client sends: { targetId } - a null/undefined targetId means a "skip" vote
-  // [MULTIPLAYER: SHARED] - the server is what keeps the vote count and
-  // decides the result, so no client can fake an outcome.
-  socket.on("castVote", ({ targetId }) => {
-    const roomCode = socket.data.roomCode;
-    const room = rooms[roomCode];
-    if (!room || !room.meeting) return;
-
-    const voter = room.players[socket.id];
-    if (!voter || !voter.alive) {
-      socket.emit("voteError", { message: "You cannot vote." });
-      return;
-    }
-
-    // Store the vote (a null targetId means a skip-vote)
-    room.meeting.votes[socket.id] = targetId || "skip";
-
-    // Tell everyone how many votes are in so far (not who voted for whom -
-    // only the count, to keep the suspense the same way Among Us does)
-    const totalAlive = Object.values(room.players).filter((p) => p.alive).length;
-    const totalVotes = Object.keys(room.meeting.votes).length;
-
-    io.to(roomCode).emit("voteUpdate", { totalVotes, totalAlive });
-
-    console.log(`${voter.name} voted in room ${roomCode} (${totalVotes}/${totalAlive})`);
-
-    // If every alive player has voted, resolve the result right away
-    if (totalVotes >= totalAlive) {
-      finalizeVoting(roomCode);
-    }
-  });
-
-  // ---- END MEETING MANUALLY (host, or any client triggering the timeout) ----
-  // If not everyone votes (some players are busy/AFK), the host or anyone
-  // else can call this to force-close voting with whatever votes came in.
-  socket.on("forceFinalizeVoting", () => {
-    const roomCode = socket.data.roomCode;
-    if (!roomCode || !rooms[roomCode] || !rooms[roomCode].meeting) return;
-    finalizeVoting(roomCode);
-  });
-
-  // ---- DISCONNECT ----
-  socket.on("disconnect", () => {
-    console.log("Player disconnected:", socket.id);
-
-    const roomCode = socket.data.roomCode;
-    if (roomCode && rooms[roomCode]) {
-      const wasHost = rooms[roomCode].players[socket.id]?.isHost;
-      delete rooms[roomCode].players[socket.id];
-
-      const remaining = Object.keys(rooms[roomCode].players);
-      if (remaining.length === 0) {
-        // Room is empty - remove it from memory
-        delete rooms[roomCode];
-        console.log(`Room ${roomCode} deleted (empty)`);
-      } else {
-        // Host-migration: if the player who left was the host, promote
-        // the next remaining player (first key in the players object) to
-        // host, so the room never gets stuck with nobody able to press
-        // Start. This fixes the "stuck room" issue noted during testing.
-        if (wasHost) {
-          const newHostId = remaining[0];
-          rooms[roomCode].players[newHostId].isHost = true;
-          console.log(`Host migrated to ${newHostId} in room ${roomCode}`);
-        }
-        // Notify the remaining players
-        io.to(roomCode).emit("playerListUpdated", {
-          players: getPlayerList(roomCode),
-        });
-      }
-    }
-  });
-});
-
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+    console
