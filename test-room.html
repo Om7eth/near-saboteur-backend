@@ -13,6 +13,10 @@
     button { background: #2a6; color: white; border: none; border-radius: 6px; }
     #log { background: #000; padding: 8px; height: 200px; overflow-y: scroll; font-size: 12px; margin-top: 10px; }
     .player { padding: 4px; border-bottom: 1px solid #333; }
+    #moveArea { position: relative; width: 100%; height: 260px; background: #1a1a2e; border: 2px solid #444; border-radius: 8px; overflow: hidden; touch-action: none; }
+    .dot { position: absolute; width: 30px; height: 30px; border-radius: 50%; transform: translate(-50%, -50%); display: flex; align-items: center; justify-content: center; font-size: 10px; color: white; }
+    #myDot { background: #2a6; border: 2px solid white; }
+    .otherDot { background: #a33; }
   </style>
 </head>
 <body>
@@ -36,6 +40,12 @@
   <h3>My Role: <span id="myRole">-</span></h3>
   <h3>Players in room:</h3>
   <div id="players"></div>
+
+  <h3>🕹️ Movement Test (yahan tap/drag karo)</h3>
+  <div id="moveArea">
+    <div id="myDot"></div>
+  </div>
+  <div id="otherDots"></div>
 
   <h3>Log:</h3>
   <div id="log"></div>
@@ -96,6 +106,10 @@
           log("🔄 Player list updated. Total: " + data.players.length);
           renderPlayers(data.players);
         });
+
+        socket.on("playerMoved", (data) => {
+          showOtherDot(data.id, data.x, data.y);
+        });
       } catch (e) {
         log("🔥 JS Error: " + e.message);
       }
@@ -128,6 +142,55 @@
       if (!socket) { log("⚠️ Pehle connect karo!"); return; }
       log("🚀 Starting game...");
       socket.emit("startGame", { imposterCount: 1 });
+    }
+
+    // ---- Movement test logic ----
+    const moveArea = document.getElementById("moveArea");
+    const myDot = document.getElementById("myDot");
+    const otherDotsDiv = document.getElementById("otherDots");
+    const otherDots = {}; // socket.id -> dot element
+
+    function moveMyDotTo(clientX, clientY) {
+      const rect = moveArea.getBoundingClientRect();
+      let x = clientX - rect.left;
+      let y = clientY - rect.top;
+      x = Math.max(0, Math.min(x, rect.width));
+      y = Math.max(0, Math.min(y, rect.height));
+
+      myDot.style.left = x + "px";
+      myDot.style.top = y + "px";
+
+      if (socket) {
+        socket.emit("playerMove", { x, y });
+      }
+    }
+
+    moveArea.addEventListener("touchmove", (e) => {
+      e.preventDefault();
+      const touch = e.touches[0];
+      moveMyDotTo(touch.clientX, touch.clientY);
+    });
+    moveArea.addEventListener("touchstart", (e) => {
+      const touch = e.touches[0];
+      moveMyDotTo(touch.clientX, touch.clientY);
+    });
+    moveArea.addEventListener("mousedown", (e) => moveMyDotTo(e.clientX, e.clientY));
+
+    function showOtherDot(id, x, y) {
+      let dot = otherDots[id];
+      if (!dot) {
+        dot = document.createElement("div");
+        dot.className = "dot otherDot";
+        dot.innerText = id.slice(0, 3);
+        otherDotsDiv.appendChild(dot);
+        otherDots[id] = dot;
+      }
+      // moveArea ke andar dot ko absolute position karna hai, lekin woh
+      // alag div mein hai - isliye moveArea ke top-left ke relative offset use karte hain
+      const rect = moveArea.getBoundingClientRect();
+      dot.style.position = "fixed";
+      dot.style.left = (rect.left + x) + "px";
+      dot.style.top = (rect.top + y) + "px";
     }
   </script>
 </body>
