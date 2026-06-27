@@ -33,6 +33,10 @@ app.get("/", (req, res) => {
   res.send("NEAR Saboteur backend is running! ✅");
 });
 
+// Yeh line zaroori hai - isse test-room.html jaisi files
+// browser mein directly khul sakti hain (static file serving).
+app.use(express.static(__dirname));
+
 // Sab rooms yahan store hote hain (in-memory)
 const rooms = {};
 
