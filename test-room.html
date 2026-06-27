@@ -30,7 +30,10 @@
   <input id="joinCode" placeholder="Room code daalo (join karne ke liye)" />
   <button onclick="joinRoom()">3. Join Room</button>
 
+  <button onclick="startGame()" style="background:#a33;">4. Start Game (host only)</button>
+
   <h3>Room Code: <span id="roomCode">-</span></h3>
+  <h3>My Role: <span id="myRole">-</span></h3>
   <h3>Players in room:</h3>
   <div id="players"></div>
 
@@ -80,6 +83,15 @@
           log("⚠️ Error: " + data.message);
         });
 
+        socket.on("startGameError", (data) => {
+          log("⚠️ Start game error: " + data.message);
+        });
+
+        socket.on("roleAssigned", (data) => {
+          log("🎭 Tumhara role: " + data.role.toUpperCase());
+          document.getElementById("myRole").innerText = data.role.toUpperCase();
+        });
+
         socket.on("playerListUpdated", (data) => {
           log("🔄 Player list updated. Total: " + data.players.length);
           renderPlayers(data.players);
@@ -110,6 +122,12 @@
       const avatarId = document.getElementById("avatarId").value;
       const code = document.getElementById("joinCode").value;
       socket.emit("joinRoom", { code, name, avatarId });
+    }
+
+    function startGame() {
+      if (!socket) { log("⚠️ Pehle connect karo!"); return; }
+      log("🚀 Starting game...");
+      socket.emit("startGame", { imposterCount: 1 });
     }
   </script>
 </body>
