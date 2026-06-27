@@ -168,6 +168,28 @@ io.on("connection", (socket) => {
     console.log(`${name} joined room ${roomCode}`);
   });
 
+  // ---- UPDATE PROFILE (name/avatar changed after already in a room) ----
+  // Client sends: { name, avatarId } - either field can be omitted to
+  // leave it unchanged. Needed because a player can open the avatar/name
+  // editor again AFTER createRoom/joinRoom already ran (e.g. while still
+  // standing around in the Lobby waiting for others), and without this
+  // event the server would keep showing everyone else the player's OLD
+  // name/avatar from whenever they first joined.
+  socket.on("updateProfile", ({ name, avatarId }) => {
+    const roomCode = socket.data.roomCode;
+    const room = rooms[roomCode];
+    if (!room || !room.players[socket.id]) return;
+
+    if (typeof name === "string" && name.trim()) {
+      room.players[socket.id].name = name.trim();
+    }
+    if (typeof avatarId === "string" && avatarId) {
+      room.players[socket.id].avatarId = avatarId;
+    }
+
+    io.to(roomCode).emit("playerListUpdated", { players: getPlayerList(roomCode) });
+  });
+
   // ---- START GAME (host only) ----
   // Client sends: { imposterCount }
   // This secretly makes random player(s) the Saboteur.
@@ -251,6 +273,22 @@ io.on("connection", (socket) => {
       // Normal alive player - broadcast to everyone (as before)
       socket.to(roomCode).emit("playerMoved", { id: socket.id, x, y, isGhost: false });
     }
+  });
+
+  // ---- LOBBY MOVE (position sync while still in the Lobby) ----
+  // Client sends: { x, y } - same idea as playerMove, but kept as a
+  // completely separate event/state on both ends. The Lobby uses
+  // PERCENTAGE coordinates (0-100, relative to the room art's own box),
+  // while in-game movement uses world-pixel coordinates (TILE-based) —
+  // mixing the two into one event would let a leftover Lobby position
+  // briefly appear in the wrong coordinate space once a player transitions
+  // into the actual game screen, so they're kept on entirely separate
+  // event names and never touch the same stored x/y field.
+  socket.on("lobbyMove", ({ x, y }) => {
+    const roomCode = socket.data.roomCode;
+    const room = rooms[roomCode];
+    if (!roomCode || !room) return;
+    socket.to(roomCode).emit("lobbyMoved", { id: socket.id, x, y });
   });
 
   // ---- KILL PLAYER (Saboteur only) ----
