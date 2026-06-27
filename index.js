@@ -62,12 +62,60 @@ function getPlayerList(roomCode) {
   }));
 }
 
+// Voting result calculate karta hai aur sabko broadcast karta hai, fir
+// meeting state ko clear kar deta hai (taaki naya meeting call ho sake).
+function finalizeVoting(roomCode) {
+  const room = rooms[roomCode];
+  if (!room || !room.meeting) return;
+
+  const votes = room.meeting.votes;
+  const counts = {}; // targetId (ya "skip") -> count
+
+  Object.values(votes).forEach((targetId) => {
+    counts[targetId] = (counts[targetId] || 0) + 1;
+  });
+
+  // Sabse zyada votes wala dhoondo; tie ho to koi eliminate nahi hota
+  let maxVotes = 0;
+  let topChoices = [];
+  Object.entries(counts).forEach(([choice, count]) => {
+    if (count > maxVotes) {
+      maxVotes = count;
+      topChoices = [choice];
+    } else if (count === maxVotes) {
+      topChoices.push(choice);
+    }
+  });
+
+  let eliminatedId = null;
+  if (maxVotes > 0 && topChoices.length === 1 && topChoices[0] !== "skip") {
+    eliminatedId = topChoices[0];
+    if (room.players[eliminatedId]) {
+      room.players[eliminatedId].alive = false;
+    }
+  }
+
+  io.to(roomCode).emit("votingResult", {
+    eliminatedId,
+    eliminatedName: eliminatedId ? room.players[eliminatedId]?.name : null,
+    voteCounts: counts,
+    tie: topChoices.length > 1,
+  });
+
+  console.log(`Voting result in room ${roomCode}: eliminated=${eliminatedId || "none"}`);
+
+  // Meeting khatam - state clear, taaki naya meeting ho sake
+  delete room.meeting;
+}
+
 io.on("connection", (socket) => {
   console.log("Player connected:", socket.id);
 
   // ---- CREATE ROOM ----
+  // Client bhejta hai: { name, avatarId }
   socket.on("createRoom", ({ name, avatarId }) => {
     let code = generateRoomCode();
+    // Bahut hi kam chance hai collision ka, lekin safety ke liye check
     while (rooms[code]) {
       code = generateRoomCode();
     }
@@ -92,6 +140,7 @@ io.on("connection", (socket) => {
   });
 
   // ---- JOIN ROOM ----
+  // Client bhejta hai: { code, name, avatarId }
   socket.on("joinRoom", ({ code, name, avatarId }) => {
     const roomCode = (code || "").toUpperCase().trim();
     const room = rooms[roomCode];
@@ -107,17 +156,23 @@ io.on("connection", (socket) => {
 
     const playerList = getPlayerList(roomCode);
 
+    // Naye player ko khud confirmation
     socket.emit("roomJoined", {
       code: roomCode,
       players: playerList,
     });
 
+    // Room ke sabko updated player-list bhejna (naya player bhi dikhega sabko)
     io.to(roomCode).emit("playerListUpdated", { players: playerList });
 
     console.log(`${name} joined room ${roomCode}`);
   });
 
-  // ---- START GAME ----
+  // ---- START GAME (sirf host kar sakta hai) ----
+  // Client bhejta hai: { imposterCount }
+  // Yeh secretly random player(s) ko Saboteur banata hai.
+  // [MULTIPLAYER: SHARED] - role decide server pe hota hai, kisi client ko
+  // doosre player ka role pata nahi chalta, sirf apna khud ka.
   socket.on("startGame", ({ imposterCount }) => {
     const roomCode = socket.data.roomCode;
     const room = rooms[roomCode];
@@ -127,6 +182,7 @@ io.on("connection", (socket) => {
       return;
     }
 
+    // Sirf host start kar sakta hai
     if (!room.players[socket.id] || !room.players[socket.id].isHost) {
       socket.emit("startGameError", { message: "Sirf host hi game start kar sakta hai." });
       return;
@@ -139,9 +195,11 @@ io.on("connection", (socket) => {
       return;
     }
 
+    // imposterCount ko valid range mein clamp karna (kam se kam 1, players se zyada nahi)
     let saboteurCount = imposterCount || 1;
     saboteurCount = Math.max(1, Math.min(saboteurCount, playerIds.length - 1));
 
+    // Players ko shuffle karke pehle N ko Saboteur banana (Fisher-Yates shuffle)
     const shuffled = [...playerIds];
     for (let i = shuffled.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
@@ -151,6 +209,7 @@ io.on("connection", (socket) => {
 
     room.gameStarted = true;
 
+    // Har player ko SIRF apna role bhejna - kisi ko doosre ka role nahi pata chalega
     playerIds.forEach((id) => {
       const role = saboteurIds.has(id) ? "saboteur" : "crewmate";
       room.players[id].role = role;
@@ -161,20 +220,31 @@ io.on("connection", (socket) => {
     console.log(`Game started in room ${roomCode}. ${saboteurCount} saboteur(s) assigned.`);
   });
 
-  // ---- PLAYER MOVE ----
+  // ---- PLAYER MOVE (position sync) ----
+  // Client bhejta hai: { x, y } - har thodi der mein (e.g. 10x per second)
+  // [MULTIPLAYER: PER-PLAYER] - apni position bhejta hai, server room ke
+  // baaki sab players ko (khud ko chhodke) forward karta hai broadcast se.
   socket.on("playerMove", ({ x, y }) => {
     const roomCode = socket.data.roomCode;
     if (!roomCode || !rooms[roomCode]) return;
 
+    // Room mein position bhi save kar lete hain (naya player join kare to
+    // usko sabki current position pata chal sake)
     if (rooms[roomCode].players[socket.id]) {
       rooms[roomCode].players[socket.id].x = x;
       rooms[roomCode].players[socket.id].y = y;
     }
 
+    // socket.to() use kiya hai (io.to() nahi) - isse khud ko message
+    // wapas nahi aata, sirf baaki players ko jaata hai. Bandwidth bachata hai.
     socket.to(roomCode).emit("playerMoved", { id: socket.id, x, y });
   });
 
-  // ---- KILL PLAYER ----
+  // ---- KILL PLAYER (sirf Saboteur kar sakta hai) ----
+  // Client bhejta hai: { targetId } - jis player ko maara
+  // [MULTIPLAYER: SHARED] - SERVER VALIDATES ki killer sach mein Saboteur hai
+  // aur dono (killer + target) alive hain. Client ke "main Saboteur hoon" claim
+  // pe kabhi trust nahi karte - room.players[socket.id].role server pe stored hai.
   socket.on("killPlayer", ({ targetId }) => {
     const roomCode = socket.data.roomCode;
     const room = rooms[roomCode];
@@ -183,6 +253,7 @@ io.on("connection", (socket) => {
     const killer = room.players[socket.id];
     const target = room.players[targetId];
 
+    // Security checks - server khud verify karta hai, client ko trust nahi karta
     if (!killer || killer.role !== "saboteur") {
       socket.emit("killError", { message: "Tum Saboteur nahi ho." });
       return;
@@ -202,6 +273,8 @@ io.on("connection", (socket) => {
 
     target.alive = false;
 
+    // Sab players ko (Saboteur sahit) batana ki kaun mara - taaki sabki
+    // screen pe body/cutscene dikh sake. killerId bhi bhejte hain animation ke liye.
     io.to(roomCode).emit("playerKilled", {
       targetId,
       killerId: socket.id,
@@ -210,7 +283,11 @@ io.on("connection", (socket) => {
     console.log(`${target.name} was killed by ${killer.name} in room ${roomCode}`);
   });
 
-  // ---- SABOTAGE ACTION ----
+  // ---- SABOTAGE ACTION (sirf Saboteur kar sakta hai) ----
+  // Client bhejta hai: { type } - "electricity" | "hacker" | "lockLeft" | "lockRight"
+  // [MULTIPLAYER: SHARED] - server validate karta hai role, phir sab players ko
+  // batata hai. Cooldown/timing logic abhi client-side hi rahegi (frontend
+  // mein already bana hua hai) - server sirf "yeh action hua" broadcast karta hai.
   socket.on("sabotageAction", ({ type }) => {
     const roomCode = socket.data.roomCode;
     const room = rooms[roomCode];
@@ -233,6 +310,7 @@ io.on("connection", (socket) => {
       return;
     }
 
+    // Sab players ko batana (Saboteur sahit) ki sabotage trigger hua
     io.to(roomCode).emit("sabotageTriggered", {
       type,
       triggeredBy: socket.id,
@@ -292,7 +370,7 @@ io.on("connection", (socket) => {
     const sender = room.players[socket.id];
     if (!sender) return;
 
-    const trimmed = (text || "").trim().slice(0, 200);
+    const trimmed = (text || "").trim().slice(0, 200); // 200 char limit, spam-protection
     if (!trimmed) return;
 
     const message = {
@@ -308,6 +386,48 @@ io.on("connection", (socket) => {
     io.to(roomCode).emit("chatMessageReceived", message);
   });
 
+  // ---- CAST VOTE ----
+  // Client bhejta hai: { targetId } - targetId null/undefined ho to "skip" vote hai
+  // [MULTIPLAYER: SHARED] - server hi vote count rakhta hai aur result decide
+  // karta hai, taaki koi client fake result na bhej sake.
+  socket.on("castVote", ({ targetId }) => {
+    const roomCode = socket.data.roomCode;
+    const room = rooms[roomCode];
+    if (!room || !room.meeting) return;
+
+    const voter = room.players[socket.id];
+    if (!voter || !voter.alive) {
+      socket.emit("voteError", { message: "Tum vote nahi de sakte." });
+      return;
+    }
+
+    // Vote store karna (targetId null ho to skip-vote hai)
+    room.meeting.votes[socket.id] = targetId || "skip";
+
+    // Sabko batana kitne vote ho gaye (kisne kise vote diya, yeh nahi batate -
+    // sirf count batate hain, taaki suspense bana rahe jaisa Among Us mein hota hai)
+    const totalAlive = Object.values(room.players).filter((p) => p.alive).length;
+    const totalVotes = Object.keys(room.meeting.votes).length;
+
+    io.to(roomCode).emit("voteUpdate", { totalVotes, totalAlive });
+
+    console.log(`${voter.name} voted in room ${roomCode} (${totalVotes}/${totalAlive})`);
+
+    // Agar sab alive players vote kar chuke, result nikal do turant
+    if (totalVotes >= totalAlive) {
+      finalizeVoting(roomCode);
+    }
+  });
+
+  // ---- END MEETING MANUALLY (host, ya timeout ke liye client trigger kar sakta hai) ----
+  // Agar sab vote nahi karte (kuch log busy/AFK), host ya koi bhi yeh call
+  // karke voting ko force-close kar sakta hai jo bhi votes aaye hain unke saath.
+  socket.on("forceFinalizeVoting", () => {
+    const roomCode = socket.data.roomCode;
+    if (!roomCode || !rooms[roomCode] || !rooms[roomCode].meeting) return;
+    finalizeVoting(roomCode);
+  });
+
   // ---- DISCONNECT ----
   socket.on("disconnect", () => {
     console.log("Player disconnected:", socket.id);
@@ -318,9 +438,11 @@ io.on("connection", (socket) => {
 
       const remaining = Object.keys(rooms[roomCode].players);
       if (remaining.length === 0) {
+        // Room khaali ho gaya - hata do memory se
         delete rooms[roomCode];
         console.log(`Room ${roomCode} deleted (empty)`);
       } else {
+        // Baaki players ko update bhejna
         io.to(roomCode).emit("playerListUpdated", {
           players: getPlayerList(roomCode),
         });
