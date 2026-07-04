@@ -1,1 +1,109 @@
+name: Build and Deploy Pool Contract
 
+# [MOBILE-ONLY WORKFLOW] Triggered manually from the "Actions" tab in
+# the GitHub app (or github.com in a mobile browser) - tap "Run
+# workflow", fill in the account IDs, tap the green button. Everything
+# below runs on GitHub's own servers, not on your phone - no computer,
+# no terminal, needed on your end at all.
+on:
+  workflow_dispatch:
+    inputs:
+      network:
+        description: "Which NEAR network to deploy to"
+        required: true
+        default: "testnet"
+        type: choice
+        options:
+          - testnet
+          - mainnet
+      contract_account_id:
+        description: "The NEAR account this contract lives on (e.g. nearsaboteurpool.testnet)"
+        required: true
+        type: string
+      owner_account_id:
+        description: "The account allowed to call owner-only functions (usually your own wallet)"
+        required: true
+        type: string
+      oracle_account_id:
+        description: "The account the game backend uses to report match points"
+        required: true
+        type: string
+      run_init:
+        description: "Run the one-time 'new' setup call after deploying? (turn OFF if re-deploying an already-initialized contract)"
+        required: true
+        default: true
+        type: boolean
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          target: wasm32-unknown-unknown
+          override: true
+
+      - name: Cache cargo registry and build output
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            contract/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('contract/Cargo.lock') }}
+
+      - name: Build contract (WASM)
+        working-directory: contract
+        run: cargo build --target wasm32-unknown-unknown --release
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install near-cli
+        run: npm install -g near-cli
+
+      # [SECURITY] This key only exists inside this one job run,
+      # injected fresh from your repo's encrypted Secrets - never
+      # written into the repository, never shown in any log (GitHub
+      # automatically masks any Secret value that appears in output),
+      # and gone the moment this job finishes.
+      - name: Write deploy key credentials
+        env:
+          DEPLOY_PRIVATE_KEY: ${{ secrets.NEAR_DEPLOY_PRIVATE_KEY }}
+          DEPLOY_PUBLIC_KEY: ${{ secrets.NEAR_DEPLOY_PUBLIC_KEY }}
+        run: |
+          mkdir -p ~/.near-credentials/${{ github.event.inputs.network }}
+          cat > ~/.near-credentials/${{ github.event.inputs.network }}/${{ github.event.inputs.contract_account_id }}.json <<EOF
+          {
+            "account_id": "${{ github.event.inputs.contract_account_id }}",
+            "public_key": "$DEPLOY_PUBLIC_KEY",
+            "private_key": "$DEPLOY_PRIVATE_KEY"
+          }
+          EOF
+
+      - name: Deploy contract WASM
+        env:
+          NEAR_ENV: ${{ github.event.inputs.network }}
+        run: |
+          near deploy \
+            --accountId ${{ github.event.inputs.contract_account_id }} \
+            --wasmFile contract/target/wasm32-unknown-unknown/release/near_saboteur_pool.wasm
+
+      - name: Run one-time setup call (new)
+        if: ${{ github.event.inputs.run_init == 'true' }}
+        env:
+          NEAR_ENV: ${{ github.event.inputs.network }}
+        run: |
+          near call ${{ github.event.inputs.contract_account_id }} new \
+            '{"owner_id": "${{ github.event.inputs.owner_account_id }}", "oracle_id": "${{ github.event.inputs.oracle_account_id }}"}' \
+            --accountId ${{ github.event.inputs.contract_account_id }}
+
+      - name: Done
+        run: echo "Contract deployed to ${{ github.event.inputs.contract_account_id }} on ${{ github.event.inputs.network }}"
