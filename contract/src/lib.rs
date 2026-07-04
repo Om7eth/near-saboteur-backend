@@ -201,7 +201,7 @@ impl Contract {
         assert!(max_matches >= 1 && max_matches <= 3, "max_matches must be 1-3");
         let host_id = env::predecessor_account_id();
         let entry_fee_val: u128 = entry_fee.into();
-        let attached = env::attached_deposit();
+        let attached = env::attached_deposit().as_yoctonear();
 
         let expected = if host_funded {
             entry_fee_val + STORAGE_DEPOSIT_YOCTO
@@ -265,7 +265,7 @@ impl Contract {
         let account_id = env::predecessor_account_id();
         assert!(!pool.participants.contains(&account_id), "Already joined this pool");
 
-        let attached = env::attached_deposit();
+        let attached = env::attached_deposit().as_yoctonear();
         let expected = if pool.host_funded { STORAGE_DEPOSIT_YOCTO } else { pool.entry_fee + STORAGE_DEPOSIT_YOCTO };
         assert_eq!(attached, expected, "Attached deposit must be exactly {} yoctoNEAR", expected);
 
@@ -418,162 +418,4 @@ impl Contract {
 
         // [FUNDS SAFETY] Mark Finalized and account for the platform
         // fee BEFORE any transfer is created.
-        pool.state = PoolState::Finalized;
-        self.platform_fees_balance += platform_cut;
-        self.pools.insert(&pool_id, &pool);
-
-        let mut promise: Option<Promise> = None;
-        for (i, (account_id, _points)) in winners.iter().enumerate() {
-            if split_total == 0 { break; }
-            let share = (payout_pool as u128 * split_bps[i] as u128) / split_total as u128;
-            if share == 0 { continue; }
-            let p = Promise::new(account_id.clone())
-                .transfer(share)
-                .then(
-                    Self::ext(env::current_account_id())
-                        .on_payout_complete(pool_id, account_id.clone(), share),
-                );
-            promise = Some(match promise {
-                Some(existing) => existing.and(p),
-                None => p,
-            });
-        }
-        promise.unwrap_or_else(|| Promise::new(env::current_account_id()))
-    }
-
-    #[private]
-    pub fn on_payout_complete(
-        &mut self,
-        pool_id: PoolId,
-        account_id: AccountId,
-        amount: u128,
-        #[callback_result] result: Result<(), PromiseError>,
-    ) {
-        if result.is_err() {
-            // [FUNDS SAFETY] Never disappears - becomes a claimable
-            // stuck-fund entry for exactly this account.
-            let mut pool = self.pools.get(&pool_id).expect("Pool not found");
-            let existing = pool.stuck_funds.get(&account_id).unwrap_or(0);
-            pool.stuck_funds.insert(&account_id, &(existing + amount));
-            self.pools.insert(&pool_id, &pool);
-        }
-    }
-
-    // ---- STUCK FUNDS ----
-    pub fn claim_stuck_funds(&mut self, pool_id: PoolId) -> Promise {
-        let mut pool = self.pools.get(&pool_id).expect("Pool not found");
-        let account_id = env::predecessor_account_id();
-        let amount = pool.stuck_funds.get(&account_id).unwrap_or(0);
-        assert!(amount > 0, "Nothing to claim");
-        pool.stuck_funds.insert(&account_id, &0);
-        self.pools.insert(&pool_id, &pool);
-        Promise::new(account_id).transfer(amount)
-    }
-
-    // [FUNDS SAFETY] Destination is ALWAYS the account this stuck
-    // balance already belongs to - there is no parameter for a
-    // different recipient. Om7eth can nudge a stuck payout along; he
-    // can never redirect it.
-    pub fn admin_release_stuck_funds(&mut self, pool_id: PoolId, account_id: AccountId) -> Promise {
-        assert_eq!(env::predecessor_account_id(), self.owner_id, "Only the owner can do this");
-        let mut pool = self.pools.get(&pool_id).expect("Pool not found");
-        let amount = pool.stuck_funds.get(&account_id).unwrap_or(0);
-        assert!(amount > 0, "Nothing stuck for that account");
-        pool.stuck_funds.insert(&account_id, &0);
-        self.pools.insert(&pool_id, &pool);
-        Promise::new(account_id).transfer(amount)
-    }
-
-    // ---- CANCEL / REACTIVATE ----
-    pub fn report_pool_issue(&mut self, pool_id: PoolId) {
-        let mut pool = self.pools.get(&pool_id).expect("Pool not found");
-        assert_eq!(env::predecessor_account_id(), pool.host_id, "Only the host can do this");
-        assert_eq!(pool.matches_played, 0, "Can only cancel before any match has been played");
-        assert_eq!(pool.state, PoolState::Active, "Pool is not active");
-        pool.state = PoolState::Cancelled;
-        pool.last_activity_nanos = env::block_timestamp();
-        self.pools.insert(&pool_id, &pool);
-    }
-
-    // [FEATURE] Existing participants' funds carry over automatically -
-    // nothing to re-deposit. New players can also join afterward
-    // (normal join_pool, since matches_played is still 0).
-    pub fn reactivate_pool(&mut self, pool_id: PoolId) {
-        let mut pool = self.pools.get(&pool_id).expect("Pool not found");
-        assert_eq!(env::predecessor_account_id(), pool.host_id, "Only the host can do this");
-        assert_eq!(pool.state, PoolState::Cancelled, "Pool is not cancelled");
-        pool.state = PoolState::Active;
-        pool.last_activity_nanos = env::block_timestamp();
-        self.pools.insert(&pool_id, &pool);
-    }
-
-    // [SAFETY NET] Anyone who's actually a participant can trigger this
-    // if a pool has sat at zero matches played with no host/backup
-    // activity for 48+ hours - this is what prevents funds being
-    // permanently stuck just because a host vanished before anyone
-    // could hand off their role. Pool becomes Cancelled, same as a
-    // normal host-initiated cancel (funds locked, reactivatable by
-    // whoever holds the host role at that point - which by then may
-    // have needed transfer_host_role from a backup, if one was set).
-    pub fn auto_cancel_stale_pool(&mut self, pool_id: PoolId) {
-        let mut pool = self.pools.get(&pool_id).expect("Pool not found");
-        let caller = env::predecessor_account_id();
-        assert!(pool.participants.contains(&caller), "Only a participant can do this");
-        assert_eq!(pool.matches_played, 0, "This pool already has matches played");
-        assert_eq!(pool.state, PoolState::Active, "Pool is not active");
-        assert!(
-            env::block_timestamp() - pool.last_activity_nanos >= STALE_POOL_TIMEOUT_NANOS,
-            "This pool hasn't been inactive long enough yet"
-        );
-        pool.state = PoolState::Cancelled;
-        self.pools.insert(&pool_id, &pool);
-    }
-
-    // ---- OWNER-ONLY ADMIN ----
-    pub fn update_points_cap(&mut self, new_cap: u64) {
-        assert_eq!(env::predecessor_account_id(), self.owner_id, "Only the owner can do this");
-        self.points_cap = new_cap;
-    }
-
-    pub fn set_platform_fee_bps(&mut self, new_bps: u16) {
-        assert_eq!(env::predecessor_account_id(), self.owner_id, "Only the owner can do this");
-        assert!(new_bps <= 2000, "Platform fee can't exceed 20%");
-        self.platform_fee_bps = new_bps;
-    }
-
-    pub fn set_oracle(&mut self, new_oracle_id: AccountId) {
-        assert_eq!(env::predecessor_account_id(), self.owner_id, "Only the owner can do this");
-        self.oracle_id = new_oracle_id;
-    }
-
-    // [FUNDS SAFETY] Only ever pays out of platform_fees_balance - the
-    // running total of fees already collected from FINALIZED pools.
-    // Cannot touch any pool's active escrow, by construction (there's
-    // no code path in this function that ever reads a Pool's
-    // total_fund).
-    pub fn withdraw_platform_fees(&mut self, amount: U128) -> Promise {
-        assert_eq!(env::predecessor_account_id(), self.owner_id, "Only the owner can do this");
-        let amount_val: u128 = amount.into();
-        assert!(amount_val <= self.platform_fees_balance, "Not enough collected fees");
-        self.platform_fees_balance -= amount_val;
-        Promise::new(self.owner_id.clone()).transfer(amount_val)
-    }
-
-    // ---- VIEW METHODS ----
-    pub fn get_pool_summary(&self, pool_id: PoolId) -> Option<(String, u8, u8, PoolState)> {
-        self.pools.get(&pool_id).map(|p| (p.name, p.matches_played, p.max_matches, p.state))
-    }
-
-    pub fn get_leaderboard(&self, pool_id: PoolId) -> Vec<(AccountId, u64)> {
-        let pool = self.pools.get(&pool_id).expect("Pool not found");
-        pool.participants
-            .iter()
-            .filter_map(|acc| pool.leaderboard.get(&acc).map(|pts| (acc, pts)))
-            .collect()
-    }
-
-    pub fn get_stuck_funds(&self, pool_id: PoolId, account_id: AccountId) -> U128 {
-        let pool = self.pools.get(&pool_id).expect("Pool not found");
-        pool.stuck_funds.get(&account_id).unwrap_or(0).into()
-    }
-}
+        pool.state = PoolState::F
