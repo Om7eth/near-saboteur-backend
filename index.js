@@ -27,6 +27,24 @@ const io = new Server(server, {
     origin: "*",
     methods: ["GET", "POST"],
   },
+  // [BUG FIX - TOO QUICK TO DECLARE MOBILE CONNECTIONS DEAD] These were
+  // left at Socket.io's library defaults (pingInterval 25s, pingTimeout
+  // 20s - so a connection that's gone quiet but is technically still
+  // open could get force-disconnected in as little as ~25s). Mobile
+  // networks routinely have brief stalls (a cell tower handoff, a wifi-
+  // to-cellular switch, a few seconds of weak signal) that are NOT the
+  // same as the connection actually being gone - a more forgiving
+  // pingTimeout means those brief stalls survive as the exact same
+  // still-connected session, instead of forcing a full disconnect +
+  // reconnect (and the 3-minute mid-game grace period, frozen avatar,
+  // etc. that comes with it) for what was really just a few seconds of
+  // spotty signal. Doesn't help the OTHER case - the mobile OS actively
+  // suspending/killing a backgrounded tab's connection outright - that
+  // closes the transport immediately and gets detected right away
+  // regardless of these numbers; the visibilitychange-triggered resync
+  // (see game.jsx) is what handles THAT case quickly instead.
+  pingInterval: 25000,
+  pingTimeout: 60000,
 });
 
 app.get("/", (req, res) => {
@@ -3944,6 +3962,35 @@ io.on("connection", (socket) => {
     const remaining = Object.keys(room.players);
     if (remaining.length === 0) {
       if (wasGameStarted) {
+        // [CRITICAL BUG FIX - SAME FUND-LOSS GAP AS THE DISCONNECT
+        // PATH] This used to just delete the room outright here too -
+        // identical gap to the one fixed in the disconnect-grace-
+        // expiry handler, just reached via the LAST player explicitly
+        // tapping Leave instead of a timeout. Same safe policy applies:
+        // refund if the pool never produced a real result, settle from
+        // the real leaderboard if every match actually finished,
+        // otherwise leave funds safely locked on-chain rather than
+        // guess wrong.
+        (async () => {
+          if (room.pool && room.pool.state !== "Distributed" && room.pool.state !== "Refunded") {
+            if (poolIsCancellable(room.pool) && (room.pool.onChainParticipantAccountIds || []).length > 0) {
+              const refund = await cancelPoolOnChain(room.pool.onChainPoolId);
+              if (refund.success) {
+                console.log(`[LAST PLAYER LEFT] Pool #${room.pool.onChainPoolId} cancelled + refunded on-chain (room ${roomCode} emptied via explicit leave mid-game).`);
+              } else {
+                console.error(`[LAST PLAYER LEFT] Pool #${room.pool.onChainPoolId} could NOT be refunded automatically (room ${roomCode} emptied via explicit leave): ${refund.error}.`);
+              }
+            } else if (room.pool.state === "Locked" && room.pool.matchesPlayed >= room.pool.maxMatches) {
+              const outcome = await distributePoolPrizes(room, roomCode);
+              console.log(outcome.success
+                ? `[LAST PLAYER LEFT] Pool #${room.pool.onChainPoolId} settled from final leaderboard (room ${roomCode} emptied via explicit leave, all matches were done).`
+                : `[LAST PLAYER LEFT] Pool #${room.pool.onChainPoolId} could NOT be settled automatically (room ${roomCode} emptied via explicit leave): ${outcome.error}.`);
+            }
+            // Else: real but incomplete progress exists - funds stay
+            // safely locked on-chain, same conservative default used
+            // everywhere else.
+          }
+        })();
         markRoomMessageClosedForever(room); // [NEW FEATURE] fire-and-forget
         delete rooms[roomCode];
         console.log(`Room ${roomCode} deleted (empty after explicit leave)`);
@@ -5700,19 +5747,15 @@ io.on("connection", (socket) => {
 
   // [NEW FEATURE - PING DISPLAY] The client reports its own measured
   // round-trip time here (see pingCheck above) - stored on their player
-  // record and broadcast to the room so everyone can see everyone
-  // else's connection quality, not just their own. Deliberately a
-  // small standalone broadcast rather than a full playerListUpdated -
-  // this fires every few seconds per player for as long as they're
-  // connected, and re-sending the entire player list that often for
-  // every room would be wasteful.
+  // record. Per Om7eth's explicit request, only shown to the player
+  // themselves (not broadcast to the room) - see getPlayerList's own
+  // pingMs field for where this becomes visible again if needed later.
   socket.on("reportPing", ({ ms }) => {
     const roomCode = socket.data.roomCode;
     const room = roomCode ? rooms[roomCode] : null;
     if (!room || !room.players[socket.id]) return;
     if (typeof ms !== "number" || !Number.isFinite(ms) || ms < 0) return;
     room.players[socket.id].pingMs = Math.round(Math.min(ms, 9999));
-    io.to(roomCode).emit("playerPingUpdated", { id: socket.id, ms: room.players[socket.id].pingMs });
   });
 
   socket.on("disconnect", () => {
