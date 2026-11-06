@@ -9927,6 +9927,7 @@ io.on("connection", (socket) => {
       }
       const payload = {
         role, spawnIndex, speedLevel: clampedSpeedLevel, alive: true, saboteurCount,
+        mapVersion: bots.MAP_VERSION, // [AI BOTS] lets the client spot a backend running an old map
         matchId: room.currentMatchId || null,
         onChainPoolId: room.pool?.onChainPoolId || null,
         killCooldownUntil: room.players[id].killCooldownUntil || 0,

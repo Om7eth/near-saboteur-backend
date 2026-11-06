@@ -23,6 +23,15 @@ const M = require("./mapData");
 const P = require("./pathfinding");
 
 const BOT_ID_PREFIX = "bot_";
+// Short fingerprint of the map the server is using (same FNV-1a hash the
+// frontend computes from its own GRID). Sent to clients at game start so a
+// stale backend (old map in memory) is easy to spot.
+function fnv1a(str) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; }
+  return h.toString(16).padStart(8, "0");
+}
+const MAP_VERSION = fnv1a(M.GRID);
 const TICK_MS = 100; // 10 Hz - clients already interpolate other players
 const MAX_PLAYERS = 10;
 // Day 2: bots are always crew. Flip on once saboteur bots can actually
@@ -458,10 +467,12 @@ function tick() {
 let tickTimer = null;
 function init({ io, rooms }) {
   ctx = { io, rooms };
+  console.log(`[BOTS] map version ${MAP_VERSION}`);
   if (!tickTimer) tickTimer = setInterval(tick, TICK_MS);
 }
 
 module.exports = {
+  MAP_VERSION,
   init,
   isBotId,
   isBot,
