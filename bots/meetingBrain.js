@@ -328,6 +328,11 @@ async function think(room, roomCode, botId, memory, bs, now, st, purpose) {
     }
   }
   if (!out || typeof out !== "object") { stats.fallbacks++; out = FC.respond(ctx, memory, bs.said, trigger, st ? st.used : new Set()); }
+  // Someone tagged this bot: never leave them hanging.
+  if (mentioned && (!out.say || !String(out.say).trim())) {
+    const again = FC.respond(ctx, memory, bs.said, { text: "where were you?", fromName: trigger ? trigger.fromName : "" }, st ? st.used : new Set());
+    out = { ...out, say: again.say || (ctx.language === "english" ? "here, nothing new from me" : "haan bolo, mere paas kuch naya nahi") };
+  }
   let say = typeof out.say === "string" ? out.say.trim() : "";
   // Models sometimes prefix their own name ("Nova: ...") or wrap in quotes.
   const esc = ctx.me.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -347,7 +352,8 @@ function tick(roomCode, room, now, api) {
   if (!meeting) return;
   const st = stateFor(roomCode, room);
   const botIds = Object.keys(room.players).filter((id) => room.players[id].isBot && room.players[id].alive !== false);
-  if (meeting.stage === "chat") {
+  const mentionOnly = (room.botChatMode || "auto") === "mention";
+  if (meeting.stage === "chat" || meeting.stage === "voting") {
     if (!st.chatStartedAt) {
       st.chatStartedAt = now;
       for (const id of botIds) {
@@ -357,7 +363,8 @@ function tick(roomCode, room, now, api) {
         bs.hasNews = hasNews;
         // People with news speak first (they start "thinking" right away so
         // a slow AI reply still lands early); others chime in later or not at all.
-        if (hasNews) { bs.nextActAt = now; bs.notBefore = now + rand(3000, 7000); bs.purpose = "open"; }
+        if ((room.botChatMode || "auto") === "mention") { bs.nextActAt = 0; bs.purpose = "chime"; } // @ only: wait to be tagged
+        else if (hasNews) { bs.nextActAt = now; bs.notBefore = now + rand(3000, 7000); bs.purpose = "open"; }
         else { bs.nextActAt = now + (chance(0.75) ? rand(9000, 30000) : rand(40000, 70000)); bs.purpose = "chime"; }
       }
     }
@@ -382,6 +389,8 @@ function tick(roomCode, room, now, api) {
         continue;
       }
       if (bs.busy || bs.pendingSay || !bs.nextActAt || now < bs.nextActAt) continue;
+      // @ only mode (or the voting window): only answer when tagged.
+      if ((mentionOnly || meeting.stage === "voting") && bs.purpose !== "reply") { bs.nextActAt = 0; continue; }
       if (bs.said.length >= MAX_MSGS_PER_BOT || (bs.said.length >= 2 && bs.purpose !== "reply")) { bs.nextActAt = 0; continue; }
       bs.busy = true;
       bs.nextActAt = 0;
@@ -403,24 +412,24 @@ function tick(roomCode, room, now, api) {
         bs.busy = false;
         if (room.meeting !== st.meetingRef) return; // meeting over
         bs.vote = vote;
-        if (say && room.meeting.stage === "chat") {
+        if (say && (room.meeting.stage === "chat" || room.meeting.stage === "voting")) {
           // If the AI was slow, "type" faster - the thinking time already passed.
           const typingMs = Math.min(7000, 1200 + say.length * 45) * (Date.now() - startedAt > 3000 ? 0.4 : 1);
           bs.pendingSay = { text: say, at: Math.max(Date.now() + typingMs, bs.notBefore || 0) };
+          if (api.emitTyping) api.emitTyping(roomCode, id, Math.max(800, bs.pendingSay.at - Date.now()));
           console.log(`[BOTS-AI] ${room.players[id] && room.players[id].name} (${source}): "${say}" -> vote ${vote === "skip" ? "skip" : (room.players[vote] || {}).name}`);
         }
       }).catch((e) => { bs.busy = false; console.warn("[BOTS-AI] think error:", e.message); });
     }
     // Skip discussion only if a human already wants to (bots never cut a
     // human's discussion short on their own).
-    const humanSkip = Object.keys(meeting.skipDiscussionVotes || {}).some((id) => room.players[id] && !room.players[id].isBot);
+    const humanSkip = meeting.stage === "chat" && Object.keys(meeting.skipDiscussionVotes || {}).some((id) => room.players[id] && !room.players[id].isBot);
     if (humanSkip) {
       for (const id of botIds) {
         const bs = botState(st, id);
         if (!bs.skipped && !bs.busy && !bs.pendingSay && chance(0.08)) { bs.skipped = true; api.voteSkipDiscussion(roomCode, id); }
       }
     }
-    return;
   }
   if (meeting.stage === "voting") {
     if (!st.votingStartedAt) {
@@ -455,11 +464,14 @@ function onChat(roomCode, room, message) {
   const text = (message.text || "").toLowerCase();
   const isQuestion = /\?|\bkya\b|\bkaun\b|\bkon\b|\bwhere\b|\bwho\b|\bkahan\b|\bkidhar\b|कौन|कहाँ|क्या/.test(text);
   const now = Date.now();
+  const mentionOnly = (room.botChatMode || "auto") === "mention";
   for (const [id, p] of Object.entries(room.players)) {
     if (!p.isBot || p.alive === false || id === message.senderId) continue;
     const bs = botState(st, id);
     if (bs.said.length >= MAX_MSGS_PER_BOT || bs.busy || bs.pendingSay) continue;
-    const named = text.includes(p.name.toLowerCase());
+    const tagged = new RegExp(`@${p.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(message.text || "");
+    const named = tagged || (!mentionOnly && text.includes(p.name.toLowerCase()));
+    if (mentionOnly && !tagged) continue;
     if (named) {
       bs.mentioned = true;
       bs.purpose = "reply";

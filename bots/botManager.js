@@ -705,6 +705,8 @@ function tick() {
           postMeetingChat: (...a) => hooks.postMeetingChat ? hooks.postMeetingChat(...a) : null,
           castMeetingVote: (...a) => hooks.castMeetingVote ? hooks.castMeetingVote(...a) : null,
           voteSkipDiscussion: (...a) => hooks.voteSkipDiscussion ? hooks.voteSkipDiscussion(...a) : null,
+          // "Nova is typing…" for everyone while a bot's reply is on its way
+          emitTyping: (rc, botId, ms) => { const b = room.players[botId]; if (b) ctx.io.to(rc).emit("botTyping", { id: botId, name: b.name, ms }); },
         });
       } catch (e) {
         console.error(`[BOTS] meeting tick error in room ${roomCode}:`, e.message);

@@ -1393,9 +1393,12 @@ function buildFullRestorePayload(room, playerData, socketId) {
       startedAt: room.meeting.startedAt,
       reason: room.meeting.reason,
       messages: room.meeting.messages || [],
+      history: room.matchChat || [],
+      meetingNo: room.meetingNo || 1,
+      botChatMode: room.botChatMode || "auto",
       deadPlayerNames: Object.values(room.players).filter((p) => !p.alive).map((p) => p.name),
       calledBy: room.meeting.calledBy,
-      liveVotes: room.meeting.votes || {},
+      liveVotes: room.meeting.votes || {}, // live votes are shown to everyone (voter avatar under target)
     } : null,
     ghostChat: (playerData.alive === false) ? (room.ghostChat || []) : null,
     crewProgress: room.gameStarted ? computeCrewProgress(room.code) : null,
@@ -7694,6 +7697,17 @@ function snapToSpeedStep(value) {
 // [AI BOTS] Extracted from the killPlayer socket handler so server-side
 // bots go through EXACTLY the same checks as humans (range, cooldown,
 // meeting, vent, roles). Returns null on success or { message } on error.
+// [CHAT REDESIGN] One meeting-chat history for the whole match: every
+// meeting adds a divider, every message and "X voted" line is kept, so the
+// discussion from earlier meetings stays visible until the match ends.
+// Cleared at game start / return to lobby, like ghost chat.
+const MATCH_CHAT_MAX = 400;
+function pushMatchChat(room, entry) {
+  room.matchChat = room.matchChat || [];
+  room.matchChat.push(entry);
+  if (room.matchChat.length > MATCH_CHAT_MAX) room.matchChat.splice(0, room.matchChat.length - MATCH_CHAT_MAX);
+}
+
 function performKill(roomCode, killerId, targetId) {
   const room = rooms[roomCode];
   if (!room) return;
@@ -8001,6 +8015,14 @@ function startMeeting(roomCode, callerId, reason, reportedBodyId) {
     };
   }
 
+  room.meetingNo = (room.meetingNo || 0) + 1;
+  {
+    const bodyP = reportedBodyId && room.players[reportedBodyId];
+    pushMatchChat(room, {
+      kind: "sep", meetingNo: room.meetingNo, reason: reason || "self",
+      callerName: caller.name, bodyName: bodyP ? bodyP.name : null, timestamp: Date.now(),
+    });
+  }
   room.meeting = {
     stage: "alarm",
     startedAt: Date.now(),
@@ -8088,6 +8110,9 @@ function startMeeting(roomCode, callerId, reason, reportedBodyId) {
     : null;
 
   io.to(roomCode).emit("meetingStarted", {
+    meetingNo: room.meetingNo,
+    history: room.matchChat || [], // [CHAT REDESIGN] whole match's meeting chat
+    botChatMode: room.botChatMode || "auto",
     calledBy: callerId,
     callerName: caller.name,
     callerAvatarId: caller.avatarId,
@@ -8174,6 +8199,7 @@ function postMeetingChat(roomCode, senderId, text, replyTo, gifUrl) {
   };
 
   room.meeting.messages.push(message);
+  pushMatchChat(room, { kind: "msg", ...message });
   bots.onMeetingChat(roomCode, message); // [AI BOTS] let bots react
 
   io.to(roomCode).emit("chatMessageReceived", message);
@@ -8242,6 +8268,11 @@ function castMeetingVote(roomCode, voterId, targetId) {
   if (!voter || !voter.alive) {
     return { message: "You cannot vote." };
   }
+  // [CHAT REDESIGN] Votes only count in the voting window (the last 30s,
+  // shown inside the chat). One vote per player, no changes.
+  if (room.meeting.stage !== "voting") {
+    return { message: "Voting hasn't started yet." };
+  }
   // [NEW FEATURE] A player can only vote once - silently ignore a
   // repeat castVote from someone who already has a stored vote this
   // meeting (the client itself already disables its own vote buttons
@@ -8283,7 +8314,10 @@ function castMeetingVote(roomCode, voterId, targetId) {
   // requested specifically to match Among Us's own live voting screen,
   // which DOES show each vote landing on its target's portrait in
   // real time.
-  io.to(roomCode).emit("voteUpdate", { totalVotes, totalAlive, voterId: voterId, choice });
+  // Live votes stay visible on purpose (Om7eth's call): every screen shows
+  // the voter's small avatar under whoever they voted for, as it happens.
+  io.to(roomCode).emit("voteUpdate", { totalVotes, totalAlive, voterId: voterId, voterName: voter.name, choice });
+  pushMatchChat(room, { kind: "sys", text: `${voter.name} voted`, voterId, timestamp: Date.now() });
 
   console.log(`${voter.name} voted in room ${roomCode} (${totalVotes}/${totalAlive})`);
 
@@ -8313,7 +8347,7 @@ function castMeetingVote(roomCode, voterId, targetId) {
       if (stillTotalAlive > 0 && stillTotalVotes >= stillTotalAlive) {
         finalizeVoting(roomCode);
       }
-    }, 3000);
+    }, 5000); // everyone voted: result 5s later
   }
   return null;
 }
@@ -8653,6 +8687,7 @@ io.on("connection", (socket) => {
     // signature above for why this exists.
     ack({
       ok: true,
+      botChatMode: rooms[code].botChatMode || "auto",
       code,
       players: getPlayerList(code),
       playerToken,
@@ -9102,6 +9137,7 @@ io.on("connection", (socket) => {
     // avatarId (may differ from what was requested, if it had to be
     // reassigned above due to a conflict).
     socket.emit("roomJoined", {
+      botChatMode: room.botChatMode || "auto",
       code: roomCode,
       players: playerList,
       playerToken,
@@ -9771,6 +9807,22 @@ io.on("connection", (socket) => {
     reply({ ok: true });
   });
 
+  // ---- [CHAT REDESIGN] Bots: Auto / @ only ----
+  // Anyone in the room may flip it; everyone sees the change. In "mention"
+  // mode bots only speak when someone tags them with @Name (they still vote).
+  socket.on("setBotChatMode", ({ mode } = {}) => {
+    const roomCode = socket.data.roomCode;
+    const room = rooms[roomCode];
+    if (!room || !room.players[socket.id]) return;
+    if (mode !== "auto" && mode !== "mention") return;
+    if ((room.botChatMode || "auto") === mode) return;
+    room.botChatMode = mode;
+    const byName = room.players[socket.id].name;
+    const text = `${byName} set bot chat to ${mode === "auto" ? "Auto" : "@ only"}`;
+    if (room.meeting) pushMatchChat(room, { kind: "sys", text, timestamp: Date.now() });
+    io.to(roomCode).emit("botChatModeChanged", { mode, byName, text });
+  });
+
   socket.on("kickPlayer", async ({ targetId }) => {
     const roomCode = socket.data.roomCode;
     const room = rooms[roomCode];
@@ -10099,6 +10151,7 @@ io.on("connection", (socket) => {
     delete room.activeSabotageType;
     delete room.departedCrewmateMissions;
     delete room.ghostChat; // [BUG FIX] Clear ghost chat between games
+    delete room.matchChat; delete room.meetingNo; // [CHAT REDESIGN] new match, fresh meeting chat
 
     // [BUG FIX] A player who disconnected mid-game (see the disconnect
     // handler's grace period) but hadn't yet had their grace period
@@ -10228,6 +10281,7 @@ io.on("connection", (socket) => {
     delete room.activeSabotageType;
     delete room.departedCrewmateMissions;
     delete room.ghostChat; // [BUG FIX] Clear ghost chat between games
+    delete room.matchChat; delete room.meetingNo; // [CHAT REDESIGN] new match, fresh meeting chat
 
     // [NEW FEATURE] Public room is joinable again - reuses the same
     // Telegram message (no spam). Fire-and-forget.
@@ -10465,6 +10519,7 @@ io.on("connection", (socket) => {
     // disconnect-grace flag) even if some reset path didn't run first.
     delete room.meeting;
     delete room.ghostChat;
+    delete room.matchChat; delete room.meetingNo; // [CHAT REDESIGN]
     delete room.activeGateLock;
     delete room.activeSabotageType;
     delete room.departedCrewmateMissions;
