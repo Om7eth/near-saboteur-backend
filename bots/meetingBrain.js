@@ -39,6 +39,11 @@ const MAX_AI_CALLS_PER_MEETING = Number(process.env.NEAR_AI_MAX_CALLS_PER_MEETIN
 // $ per 1M tokens; refreshed from NEAR AI's public model list at startup.
 let price = { input: 0.08, output: 0.5 };
 const stats = { day: "", spendUsd: 0, calls: 0, failures: 0, fallbacks: 0, budgetHitLogged: false };
+// Out of NEAR AI credits (HTTP 402): pause AI calls for a while instead of
+// hitting the API on every meeting. Staking credits accrue per second, so
+// it comes back on its own.
+const NO_CREDIT_PAUSE_MS = 15 * 60 * 1000;
+let aiPausedUntil = 0;
 const today = () => new Date().toISOString().slice(0, 10);
 function rollDay() {
   if (stats.day !== today()) { stats.day = today(); stats.spendUsd = 0; stats.budgetHitLogged = false; }
@@ -100,6 +105,7 @@ function memoryLines(memory, now, isSab) {
 // ---- NEAR AI Cloud ------------------------------------------------------
 function aiAllowed(st) {
   if (!API_KEY) return false;
+  if (Date.now() < aiPausedUntil) return false;
   rollDay();
   if (stats.spendUsd >= DAILY_BUDGET_USD) {
     if (!stats.budgetHitLogged) { stats.budgetHitLogged = true; console.warn(`[BOTS-AI] daily NEAR AI budget ($${DAILY_BUDGET_USD}) used up - rule-based lines until tomorrow (UTC)`); }
@@ -129,6 +135,11 @@ async function callNearAI(system, user) {
       }),
       signal: ctrl.signal,
     });
+    if (res.status === 402) {
+      aiPausedUntil = Date.now() + NO_CREDIT_PAUSE_MS;
+      console.warn(`[BOTS-AI] NEAR AI credits used up (402) - rule-based chat for the next 15 min. Top up or wait for staking credits on cloud.near.ai.`);
+      throw new Error("insufficient credits");
+    }
     if (!res.ok) throw new Error(`HTTP ${res.status} ${(await res.text()).slice(0, 160)}`);
     const data = await res.json();
     stats.calls++;
@@ -136,7 +147,10 @@ async function callNearAI(system, user) {
     rollDay();
     stats.spendUsd += ((u.prompt_tokens || 0) * price.input + (u.completion_tokens || 0) * price.output) / 1e6;
     const content = data && data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content;
-    if (!content) throw new Error("empty completion");
+    if (!content) {
+      const rt = (u.completion_tokens_details && u.completion_tokens_details.reasoning_tokens) || u.reasoning_tokens || 0;
+      throw new Error(rt ? `empty reply - model spent ${rt} tokens reasoning (try a non-reasoning NEAR_AI_MODEL)` : "empty completion");
+    }
     const m = String(content).match(/\{[\s\S]*\}/);
     if (!m) throw new Error("no JSON in completion");
     return JSON.parse(m[0]);
