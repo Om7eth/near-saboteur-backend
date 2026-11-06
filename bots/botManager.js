@@ -21,6 +21,7 @@
 const crypto = require("crypto");
 const M = require("./mapData");
 const P = require("./pathfinding");
+const B = require("./brain");
 
 const BOT_ID_PREFIX = "bot_";
 // Short fingerprint of the map the server is using (same FNV-1a hash the
@@ -34,10 +35,10 @@ function fnv1a(str) {
 const MAP_VERSION = fnv1a(M.GRID);
 const TICK_MS = 100; // 10 Hz - clients already interpolate other players
 const MAX_PLAYERS = 10;
-// Day 2: bots are always crew. Flip on once saboteur bots can actually
-// kill (Day 3) - until then a bot saboteur would just wander and get
-// auto-eliminated by the 7-minute no-kill rule.
-const BOTS_CAN_BE_SABOTEUR = false;
+// Bots can be drawn as Saboteur (they hunt, kill and sabotage - see
+// considerHunt / stepHunt below).
+const BOTS_CAN_BE_SABOTEUR = true;
+const PERCEIVE_MS = 400;
 // Clients teleport everyone back to their spawn point 4s after a vote
 // result (see votingResult in game.jsx). Bots copy that.
 const POST_MEETING_RESPAWN_MS = 4000;
@@ -46,6 +47,9 @@ const BOT_NAMES = ["Nova", "Atlas", "Orbit", "Pixel", "Echo", "Comet", "Byte", "
 const ALL_AVATAR_IDS = ["purple", "green", "red", "black", "darkgreen", "magenta", "yellow", "brown", "orange", "cyan"];
 
 let ctx = null; // { io, rooms }
+// Game actions provided by index.js (same code paths humans use).
+let hooks = { performKill: null, performSabotage: null, startMeeting: null, completeMission: null, killRangePx: 84 };
+function setHooks(h) { hooks = { ...hooks, ...h }; }
 // Per-bot brain state, keyed by bot id (ids are globally unique).
 const brains = new Map();
 // Per-room bookkeeping, keyed by room code.
@@ -237,6 +241,7 @@ function onGameStarted(roomCode, room, playerIds) {
     // Small random delay so bots don't all leave spawn in lockstep, and
     // clients have time to finish the loading screen.
     b.waitUntil = now + rand(3000, 6000);
+    B.setupForGame(room, id, p, b, now);
     brains.set(id, b);
     ctx.io.to(roomCode).emit("playerMoved", { id, x: p.x, y: p.y, isGhost: false });
   });
@@ -254,6 +259,8 @@ function chooseDestination(room, p, brain) {
   const from = { x: p.x, y: p.y };
   const tryPath = (pt, roomId) => {
     if (!pt) return false;
+    // Don't plan to stop right on top of someone else.
+    if (Object.values(room.players).some((o) => o !== p && o.alive !== false && typeof o.x === "number" && Math.hypot(o.x - pt.x, o.y - pt.y) < 22)) return false;
     const path = P.findPath(from, pt, locked);
     if (!path || !path.length) return false;
     brain.path = path;
@@ -282,6 +289,190 @@ function startLeg(brain, now) {
   brain.legSpeed = rand(0.84, 0.97); // nobody walks at exactly max speed all the time
 }
 
+// ---- Decisions ---------------------------------------------------------
+// Pick a free spot from a list (not right on top of another player).
+function freeSpot(room, id, spots) {
+  const others = Object.entries(room.players).filter(([oid, o]) => oid !== id && o.alive !== false && typeof o.x === "number");
+  const shuffled = [...spots].sort(() => rand(-1, 1));
+  for (const s of shuffled) {
+    if (others.every(([, o]) => Math.hypot(o.x - s.x, o.y - s.y) > 22)) return s;
+  }
+  return shuffled[0] || null;
+}
+function pathTo(room, p, brain, pt) {
+  if (!pt) return false;
+  const path = P.findPath({ x: p.x, y: p.y }, pt, lockedGatesFor(room));
+  if (!path || !path.length) return false;
+  brain.path = path;
+  return true;
+}
+function goToStation(room, id, p, brain, stationRoom, mode) {
+  const st = B.STATION_SPOTS[stationRoom];
+  if (!st || !pathTo(room, p, brain, freeSpot(room, id, st.spots))) return false;
+  brain.mode = mode;
+  brain.taskRoom = stationRoom;
+  return true;
+}
+
+// Next thing to do when the bot has nowhere to go.
+function decide(roomCode, room, id, p, brain, now) {
+  const isSab = p.role === "saboteur";
+  if (p.alive === false) {
+    // Ghost: just finish the missions.
+    const left = (brain.tasks || []).filter((t) => !t.done);
+    return left.length ? goToStation(room, id, p, brain, left[0].room, "toTask") : false;
+  }
+  if (!isSab && brain.pendingBody) {
+    const body = room.players[brain.pendingBody];
+    if (body && typeof body.bodyX === "number" && pathTo(room, p, brain, { x: body.bodyX, y: body.bodyY })) {
+      brain.mode = "toBody";
+      return true;
+    }
+    brain.pendingBody = null;
+  }
+  const todo = (brain.tasks || []).filter((t) => !t.done);
+  // Crew: mostly work through missions; Saboteur: pretend to.
+  if (todo.length && B.chance(isSab ? 0.5 : 0.8)) {
+    if (goToStation(room, id, p, brain, B.pick(todo).room, "toTask")) return true;
+  }
+  // Now and then go check the Security Hub cameras.
+  if (now - (brain.lastCamsAt || 0) > 60000 && B.chance(isSab ? 0.1 : 0.2)) {
+    if (goToStation(room, id, p, brain, "security", "toCams")) return true;
+  }
+  brain.mode = "wander";
+  return chooseDestination(room, p, brain);
+}
+
+// The bot just reached the end of its path.
+function arrive(roomCode, room, id, p, brain, now) {
+  switch (brain.mode) {
+    case "toTask":
+      brain.mode = "working";
+      brain.waitUntil = now + rand(5000, 10000); // missions take a few seconds
+      return;
+    case "working": {
+      const t = (brain.tasks || []).find((x) => x.room === brain.taskRoom && !x.done);
+      if (t) {
+        t.done = true;
+        if (p.role === "crewmate") {
+          (p.missionsList || []).forEach((m) => { if (m.room === t.room) m.done = true; });
+          if (hooks.completeMission) hooks.completeMission(roomCode, id);
+        }
+        B.remember(brain, { kind: "did", what: B.MISSION_LABEL[t.room] || "a mission", where: B.ROOM_NAME[t.room] || t.room, fake: p.role !== "crewmate" });
+      }
+      brain.mode = "idle";
+      brain.waitUntil = now + rand(400, 1800);
+      return;
+    }
+    case "toCams":
+      brain.mode = "cameras";
+      brain.watchUntil = now + rand(8000, 15000);
+      brain.waitUntil = brain.watchUntil;
+      brain.lastCamsAt = now;
+      B.remember(brain, { kind: "did", what: "watched the cameras", where: "Security" });
+      return;
+    case "cameras":
+      brain.mode = "idle";
+      return;
+    case "toBody": {
+      const bodyId = brain.pendingBody;
+      const body = bodyId && room.players[bodyId];
+      if (!body || typeof body.bodyX !== "number") { brain.pendingBody = null; brain.mode = "idle"; return; }
+      if (Math.hypot(body.bodyX - p.x, body.bodyY - p.y) > 50) { brain.mode = "idle"; return; } // body not where we went; decide again
+      const err = hooks.startMeeting ? hooks.startMeeting(roomCode, id, "report", bodyId) : { message: "no hook" };
+      if (!err) {
+        brain.reported.add(bodyId);
+        brain.pendingBody = null;
+        B.remember(brain, { kind: "reported", who: bodyId, name: body.name, where: B.roomNameAt(body.bodyX, body.bodyY) });
+        brain.mode = "idle";
+      } else if (err.cooldownRemainingMs) {
+        brain.waitUntil = now + err.cooldownRemainingMs + 300; // try again when allowed
+      } else {
+        brain.pendingBody = null;
+        brain.mode = "idle";
+      }
+      return;
+    }
+    default:
+      brain.mode = "idle";
+      // Linger: short after a small in-room shuffle, longer after arriving
+      // somewhere new (looking around).
+      brain.waitUntil = now + (brain.localMove ? rand(1000, 3500) : rand(2500, 8000));
+  }
+}
+
+// ---- Saboteur: hunting --------------------------------------------------
+function isFellowSaboteur(room, oid) {
+  // Saboteurs are told who their teammates are (fellowSaboteurs), so this
+  // is information a human Saboteur has too.
+  return room.players[oid] && room.players[oid].role === "saboteur";
+}
+function considerHunt(roomCode, room, id, p, brain, seen, now) {
+  if (brain.mode === "hunt" || brain.mode === "flee" || room.meeting) return;
+  if (now < Math.max(p.killCooldownUntil || 0, brain.killPatienceUntil || 0)) return;
+  const crewSeen = seen.filter((oid) => !isFellowSaboteur(room, oid));
+  if (!crewSeen.length) return;
+  // Getting desperate near the 7-minute no-kill deadline: accept one witness.
+  const desperate = !room.saboteurTeamHasKilled && now - (brain.gameStartedAt || now) > 4.5 * 60 * 1000;
+  const allowed = desperate ? 1 : 0;
+  const target = crewSeen
+    .map((oid) => ({ oid, d: Math.hypot(room.players[oid].x - p.x, room.players[oid].y - p.y) }))
+    .sort((a, b) => a.d - b.d)[0];
+  if (crewSeen.length - 1 > allowed) return;
+  brain.mode = "hunt";
+  brain.target = target.oid;
+  brain.huntSince = now;
+  brain.path = null;
+  brain.waitUntil = 0;
+}
+function stepHunt(roomCode, room, id, p, brain, seen, now) {
+  const t = room.players[brain.target];
+  const give = (ms) => { brain.mode = "idle"; brain.target = null; brain.path = null; brain.killPatienceUntil = now + ms; };
+  if (!t || t.alive === false || room.meeting) return give(rand(5000, 12000));
+  const visible = seen.includes(brain.target);
+  if (visible) brain.targetLastSeen = now;
+  if (now - (brain.targetLastSeen || brain.huntSince) > 2500) return give(rand(6000, 14000)); // lost them
+  const desperate = !room.saboteurTeamHasKilled && now - (brain.gameStartedAt || now) > 4.5 * 60 * 1000;
+  const witnesses = seen.filter((oid) => oid !== brain.target && !isFellowSaboteur(room, oid)).length;
+  if (witnesses > (desperate ? 1 : 0)) return give(rand(8000, 16000)); // someone else showed up
+  if (now - brain.huntSince > 25000) return give(rand(10000, 20000)); // don't chase forever
+  const d = Math.hypot(t.x - p.x, t.y - p.y);
+  if (d <= hooks.killRangePx * 0.7 && visible) {
+    const err = hooks.performKill ? hooks.performKill(roomCode, id, brain.target) : { message: "no hook" };
+    if (!err) {
+      B.remember(brain, { kind: "i-killed", who: brain.target, name: t.name, where: B.roomNameAt(t.x, t.y) });
+      brain.reported.add(brain.target); // never "find" your own kill by accident
+      brain.mode = "flee";
+      brain.target = null;
+      brain.killPatienceUntil = now + rand(25000, 50000);
+      brain.path = null;
+      // Walk away to somewhere else, like nothing happened.
+      chooseDestination(room, p, brain);
+      startLeg(brain, now);
+      brain.legSpeed = rand(0.95, 1.0);
+      return;
+    }
+    return give(rand(4000, 9000));
+  }
+  // Chase: re-plan toward the target's current position.
+  if (!brain.path || now - (brain.huntPathAt || 0) > 400) {
+    brain.huntPathAt = now;
+    if (!pathTo(room, p, brain, { x: t.x, y: t.y })) return give(rand(5000, 10000));
+    startLeg(brain, now);
+    brain.legStartedAt = now - 1000; // already moving, no ease-in
+    brain.legSpeed = rand(0.93, 1.0);
+  }
+}
+function maybeSabotage(roomCode, room, id, p, brain, seen, now) {
+  if (now < (brain.nextSabotageAt || 0) || room.meeting || !hooks.performSabotage) return;
+  brain.nextSabotageAt = now + rand(45000, 90000);
+  const lightsOn = !room.activeSabotageType;
+  const type = lightsOn && B.chance(0.4) ? "electricity" : (B.chance(0.5) ? "gateLeft" : "gateRight");
+  if (!hooks.performSabotage(roomCode, id, type)) {
+    B.remember(brain, { kind: "i-sabotaged", what: type });
+  }
+}
+
 function stepBot(roomCode, room, id, p, brain, dtSec, now) {
   // Re-plan if the gate-lock situation changed under us.
   const locked = lockedGatesFor(room);
@@ -289,25 +480,53 @@ function stepBot(roomCode, room, id, p, brain, dtSec, now) {
   if (lockKey !== brain.lockKey) {
     brain.lockKey = lockKey;
     if (brain.path) brain.path = null;
+    if (brain.mode === "toTask" || brain.mode === "toCams" || brain.mode === "toBody") brain.mode = "idle";
   }
 
-  if (brain.waitUntil > now) return;
+  // Eyes: look around a few times per second.
+  if (brain.memory && p.alive !== false && now - (brain.lastPerceiveAt || 0) >= PERCEIVE_MS) {
+    brain.lastPerceiveAt = now;
+    brain.seen = B.perceive(room, id, p, brain, now);
+    if (p.role === "saboteur") {
+      considerHunt(roomCode, room, id, p, brain, brain.seen, now);
+      maybeSabotage(roomCode, room, id, p, brain, brain.seen, now);
+    } else if (brain.pendingBody && brain.mode !== "toBody") {
+      // Spotted a body: drop everything and go report it.
+      brain.path = null;
+      brain.waitUntil = 0;
+      brain.mode = "idle";
+    }
+  }
 
-  if (!brain.path || brain.path.length === 0) {
-    if (!chooseDestination(room, p, brain)) {
-      brain.waitUntil = now + 1500; // nowhere reachable right now (e.g. gates locked) - try again soon
+  if (brain.mode === "hunt") {
+    stepHunt(roomCode, room, id, p, brain, brain.seen || [], now);
+    if (brain.mode !== "hunt" && brain.mode !== "flee") return;
+  } else {
+    if (brain.waitUntil > now) return;
+    if (!brain.path || brain.path.length === 0) {
+      brain.path = null;
+      // A timed activity (doing a mission / watching cameras) just ended.
+      if (brain.mode === "working" || brain.mode === "cameras") {
+        arrive(roomCode, room, id, p, brain, now);
+        return;
+      }
+      // Travel was interrupted (re-plan, gate lock): think again.
+      if (brain.mode === "toTask" || brain.mode === "toCams" || brain.mode === "toBody") brain.mode = "idle";
+      if (!(brain.memory ? decide(roomCode, room, id, p, brain, now) : chooseDestination(room, p, brain))) {
+        brain.waitUntil = now + 1500; // nowhere reachable right now (e.g. gates locked) - try again soon
+        return;
+      }
+      startLeg(brain, now);
+    }
+    // Occasional short hesitation mid-walk, like a player glancing around
+    // or checking the map (~once every 25s of walking).
+    if (brain.mode !== "toBody" && rand(0, 1) < 0.004 * (dtSec / 0.1)) {
+      brain.waitUntil = now + rand(400, 1400);
+      brain.legStartedAt = brain.waitUntil; // ease back in afterwards
       return;
     }
-    startLeg(brain, now);
   }
-
-  // Occasional short hesitation mid-walk, like a player glancing around
-  // or checking the map (~once every 25s of walking).
-  if (rand(0, 1) < 0.004 * (dtSec / 0.1)) {
-    brain.waitUntil = now + rand(400, 1400);
-    brain.legStartedAt = brain.waitUntil; // ease back in afterwards
-    return;
-  }
+  if (!brain.path || !brain.path.length) return;
 
   // Ease in at the start of a leg and ease out at the very end, instead
   // of snapping between full speed and a dead stop.
@@ -316,7 +535,7 @@ function stepBot(roomCode, room, id, p, brain, dtSec, now) {
     return acc + Math.hypot(wp.x - prev.x, wp.y - prev.y);
   }, 0);
   const easeIn = Math.min(1, Math.max(0.3, (now - (brain.legStartedAt || now)) / 350));
-  const easeOut = Math.min(1, Math.max(0.35, remaining / 28));
+  const easeOut = brain.mode === "hunt" ? 1 : Math.min(1, Math.max(0.35, remaining / 28));
   let budget = speedPxPerSec(room) * (brain.legSpeed || 0.9) * Math.min(easeIn, easeOut) * dtSec;
 
   while (budget > 0 && brain.path.length) {
@@ -333,11 +552,15 @@ function stepBot(roomCode, room, id, p, brain, dtSec, now) {
       budget = 0;
     }
   }
-  if (!brain.path.length) {
+  if (!brain.path.length && brain.mode !== "hunt") {
     brain.path = null;
-    // Linger: short after a small in-room shuffle, longer after arriving
-    // somewhere new (looking around / "doing something").
-    brain.waitUntil = now + (brain.localMove ? rand(1000, 3500) : rand(2500, 8000));
+    if (brain.mode === "toTask" || brain.mode === "toCams" || brain.mode === "toBody") {
+      arrive(roomCode, room, id, p, brain, now);
+    } else {
+      // wander / flee / idle: linger a bit, then decide again
+      brain.mode = "idle";
+      brain.waitUntil = now + (brain.localMove ? rand(1000, 3500) : rand(2500, 8000));
+    }
   }
 }
 
@@ -386,6 +609,15 @@ function broadcastIfMoved(roomCode, id, p, brain) {
   const last = brain.lastBroadcast;
   if (last && last.x === x && last.y === y) return;
   brain.lastBroadcast = { x, y };
+  if (p.alive === false) {
+    // Ghost: only other ghosts may see it move (same rule as playerMove).
+    const room = ctx.rooms[roomCode];
+    if (!room) return;
+    for (const [oid, o] of Object.entries(room.players)) {
+      if (oid !== id && o.alive === false && !o.isBot) ctx.io.to(oid).emit("playerMoved", { id, x, y, isGhost: true });
+    }
+    return;
+  }
   ctx.io.to(roomCode).emit("playerMoved", { id, x, y, isGhost: false });
 }
 
@@ -439,6 +671,10 @@ function tick() {
         const b = brains.get(id) || newBrain();
         b.path = null;
         b.waitUntil = now + rand(1500, 4000);
+        // A meeting clears every body and interrupts whatever we were doing.
+        b.mode = "idle"; b.target = null; b.pendingBody = null; b.watchUntil = 0;
+        if (b.reported) Object.entries(room.players).forEach(([oid, o]) => { if (o.alive === false) b.reported.add(oid); });
+        if (p.role === "saboteur") b.killPatienceUntil = Math.max(b.killPatienceUntil || 0, now + rand(10000, 25000));
         brains.set(id, b);
         broadcastIfMoved(roomCode, id, p, b);
       }
@@ -447,7 +683,14 @@ function tick() {
 
     for (const id of ids) {
       const p = room.players[id];
-      if (!p || p.alive === false) continue; // dead bots stay put (ghost bots: later)
+      if (!p) continue;
+      // Dead crew bots keep doing their missions as ghosts (humans' ghosts
+      // can too, and crew can't win on missions otherwise). Other dead
+      // bots just stay put.
+      if (p.alive === false) {
+        const b = brains.get(id);
+        if (p.role !== "crewmate" || !b || !b.tasks || b.tasks.every((t) => t.done)) continue;
+      }
       if (typeof p.x !== "number" || typeof p.y !== "number") continue;
       let brain = brains.get(id);
       if (!brain) { brain = newBrain(); brains.set(id, brain); }
@@ -464,6 +707,26 @@ function tick() {
   }
 }
 
+// A kill just happened (called from index.js performKill): bots that
+// could see it remember it, crew bots go report the body.
+function onKill(roomCode, killerId, victimId) {
+  const room = ctx && ctx.rooms[roomCode];
+  if (!room) return;
+  const killer = room.players[killerId];
+  if (!killer || !room.players[victimId]) return;
+  for (const id of botIds(room)) {
+    if (id === killerId) continue;
+    const p = room.players[id];
+    const brain = brains.get(id);
+    if (!p || p.alive === false || !brain || !brain.memory) continue;
+    B.witnessKill(room, id, p, brain, killer, victimId, killerId);
+  }
+}
+function memoryOf(botId) {
+  const b = brains.get(botId);
+  return b && b.memory ? b.memory.slice() : [];
+}
+
 let tickTimer = null;
 function init({ io, rooms }) {
   ctx = { io, rooms };
@@ -474,6 +737,9 @@ function init({ io, rooms }) {
 module.exports = {
   MAP_VERSION,
   init,
+  setHooks,
+  onKill,
+  memoryOf,
   isBotId,
   isBot,
   botIds,

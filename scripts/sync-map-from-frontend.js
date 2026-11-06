@@ -40,6 +40,8 @@ const NAMES = [
   // Lobby room (percentage coordinates) - LOBBY_PLAYER_HALF_X's statement
   // also declares LOBBY_PLAYER_HALF_Y.
   "LOBBY_SOLIDS", "LOBBY_FLOOR", "LOBBY_PLAYER_HALF_X",
+  // Vision + Security Hub camera feeds (what a bot could legitimately see)
+  "VISION_RADIUS_SABOTAGED", "CAMERAS",
 ];
 
 const src = fs.readFileSync(gamePath, "utf8");

@@ -7687,6 +7687,456 @@ function snapToSpeedStep(value) {
   return closest;
 }
 
+// [AI BOTS] Extracted from the killPlayer socket handler so server-side
+// bots go through EXACTLY the same checks as humans (range, cooldown,
+// meeting, vent, roles). Returns null on success or { message } on error.
+function performKill(roomCode, killerId, targetId) {
+  const room = rooms[roomCode];
+  if (!room) return;
+  // [BUG FIX] Reject any game action once the game has already ended -
+  // see the comment above this handler for why.
+  if (room.winner || !room.gameStarted) {
+    return { message: "The game has already ended." };
+  }
+
+  const killer = room.players[killerId];
+  const target = room.players[targetId];
+
+  // Security checks - the server verifies this itself, never trusting the client
+  if (!killer || killer.role !== "saboteur") {
+    return { message: "You are not the Saboteur." };
+  }
+  // [BUG FIX] No kill checks ever stopped this from happening DURING an
+  // active meeting (alarm/chat/voting) - everyone's frozen on the
+  // meeting screen at that point and shouldn't be killable at all, same
+  // as Among Us. A modified client could otherwise sneak a kill in
+  // mid-discussion.
+  if (room.meeting) {
+    return { message: "Cannot kill during a meeting." };
+  }
+  // [BUG FIX] Same logic as the meeting-block above - a Saboteur who's
+  // currently inside a vent (between an 'enter' and matching 'exit')
+  // shouldn't be able to kill, since they're supposed to be physically
+  // tucked away in the walls at that moment, not standing next to
+  // anyone.
+  if (killer.inVent) {
+    return { message: "Cannot kill while inside a vent." };
+  }
+  if (!killer.alive) {
+    return { message: "You are already dead." };
+  }
+  if (!target || !target.alive) {
+    return { message: "Target is not valid." };
+  }
+  if (target.role === "saboteur") {
+    return { message: "The Saboteur cannot kill another Saboteur." };
+  }
+  // [BUG FIX] Server-side proximity check - the killer's and target's
+  // last-known positions (kept up to date via every playerMove) must be
+  // within SERVER_KILL_RANGE_PX of each other. Without this, the only
+  // thing stopping a remote/cross-map kill was the frontend's own
+  // button-visibility logic, which a modified client trivially bypasses
+  // by just emitting killPlayer directly.
+  if (
+    typeof killer.x !== "number" || typeof killer.y !== "number" ||
+    typeof target.x !== "number" || typeof target.y !== "number" ||
+    Math.hypot(killer.x - target.x, killer.y - target.y) > SERVER_KILL_RANGE_PX
+  ) {
+    return { message: "Target is too far away." };
+  }
+  // Server-side cooldown enforcement (20s) - mirrors the client's own
+  // KILL_COOLDOWN_MS, but checked here too so a modified client can't
+  // bypass the cooldown by just not enforcing it locally.
+  // [UPDATE] Standardized to 20s (was 25s) to match the same cooldown
+  // now also applied at game start and at the end of every meeting -
+  // one consistent number everywhere, per Om7eth's explicit request.
+  const now = Date.now();
+  if (killer.killCooldownUntil && now < killer.killCooldownUntil) {
+    return { message: "Kill is still on cooldown." };
+  }
+  killer.killCooldownUntil = now + 20000;
+  // [BUG FIX] Server-side mirror of the frontend's postKillLockUntil
+  // (20s sabotage lockdown after any kill) - set here so the
+  // server-side sabotage check above can actually enforce it too,
+  // not just block based on its own independent cooldown.
+  killer.postKillSabotageLockUntil = now + 20000;
+  // [NEW FEATURE - SABOTEUR CAN NOW REPORT BODIES] Saboteurs can report
+  // a dead body themselves now (see callMeeting), but reporting the
+  // instant after a kill would be an obvious fake-alibi exploit - stand
+  // over the body, kill, immediately report, look like you "found" it.
+  // This 15s lockout (server-authoritative, checked in callMeeting)
+  // forces a believable gap before the killer themself can be the one
+  // to call it in.
+  killer.postKillReportLockUntil = now + 15000;
+  // [UPDATE] Team-wide, not per-killer - ANY Saboteur landing a kill
+  // satisfies the whole team's kill-timer deadline (see the
+  // saboteurKillTimer interval near the bottom of this file), not just
+  // this specific one.
+  room.saboteurTeamHasKilled = true;
+  // [BUG-PROOFING] If someone OTHER than the currently at-risk
+  // Saboteur got this kill, that at-risk Saboteur's screen may already
+  // be mid-countdown - tell them specifically to clear it now, rather
+  // than leaving a scary countdown ticking toward a deadline that (per
+  // the check above) can no longer actually eliminate them.
+  if (room.saboteurAtRiskId && room.saboteurAtRiskId !== killerId) {
+    io.to(room.saboteurAtRiskId).emit("saboteurTimerCleared");
+  }
+
+  target.alive = false;
+  // [POINTS SYSTEM STEP 2] Per-match kill count for this Saboteur -
+  // capped (see POINTS.saboteur.maxKillsCounted) when points are
+  // actually calculated, not here - this just records the raw count.
+  killer.killsCount = (killer.killsCount || 0) + 1;
+  // Store where the body fell — sent to everyone below (bodyDropped),
+  // but that event ONLY carries position/avatar data, never a
+  // notification or popup. Each client decides entirely on its own,
+  // locally, whether to show a Report button/popup based on whether
+  // THEIR OWN player is currently standing close to it — exactly the
+  // same proximity check (canReportBody/nearestReportableBody) already
+  // used elsewhere in the game. No other player's screen is ever told
+  // "someone found a body" by the server.
+  target.bodyX = target.x;
+  target.bodyY = target.y;
+
+  // [FAIRNESS FIX] Only the killer and the victim see the kill cutscene
+  // and learn about it right away — exactly like Among Us, nobody else
+  // in the room is told anything here.
+  io.to(killerId).emit("playerKilled", { targetId, killerId: killerId });
+  io.to(targetId).emit("playerKilled", { targetId, killerId: killerId });
+  // [BUG FIX] A player who just died had no way to see ghost chat
+  // history from before their death - they'd only get messages going
+  // forward via the live listener. Send them the existing backlog now.
+  io.to(targetId).emit("ghostChatBacklog", { messages: room.ghostChat || [] });
+
+  // Everyone else (and the killer/victim too) gets the body's raw
+  // position/avatar data so it can render on their map once they're
+  // close enough to see it for themselves — same as how any other
+  // player's position is just data, not an announcement.
+  io.to(roomCode).except(killerId).emit("bodyDropped", {
+    bodyOwnerId: targetId,
+    x: target.bodyX,
+    y: target.bodyY,
+    avatarId: target.avatarId,
+    avatarVariantId: target.avatarVariantId || null,
+  });
+
+  console.log(`${target.name} was killed by ${killer.name} in room ${roomCode}`);
+
+  // [WIN CONDITION] A kill can immediately end the game if crewmates
+  // are now too few relative to Saboteurs - check right away rather
+  // than waiting for the next meeting.
+  // [AI BOTS] let bots that could see this happen remember it
+  bots.onKill(roomCode, killerId, targetId);
+
+  checkWinCondition(roomCode);
+  return null;
+}
+
+// [AI BOTS] Extracted from the sabotageAction socket handler (same rules
+// for humans and bots). Returns null on success or { message } on error.
+function performSabotage(roomCode, playerId, type) {
+  const room = rooms[roomCode];
+  if (!room) return;
+  // [BUG FIX] Same post-game-end guard as killPlayer.
+  if (room.winner || !room.gameStarted) {
+    return { message: "The game has already ended." };
+  }
+
+  const player = room.players[playerId];
+
+  if (!player || player.role !== "saboteur") {
+    return { message: "You are not the Saboteur." };
+  }
+  if (!player.alive) {
+    return { message: "You are already dead." };
+  }
+  // [BUG FIX] Same fix as killPlayer - sabotage shouldn't be triggerable
+  // while everyone's frozen in an active meeting either.
+  if (room.meeting) {
+    return { message: "Cannot sabotage during a meeting." };
+  }
+  if (player.inVent) {
+    return { message: "Cannot sabotage while inside a vent." };
+  }
+
+  // [BUG FIX] Was "lockLeft"/"lockRight" here, but the frontend has
+  // always sent "gateLeft"/"gateRight" (see triggerSabotageAction's
+  // key->serverType mapping) - meaning EVERY gate-lock sabotage attempt
+  // was silently failing this validTypes check and returning a
+  // sabotageError the whole time, never actually reaching the code
+  // below that's supposed to set room.activeGateLock. This was a
+  // contributing root cause of "gate lock doesn't work for anyone" -
+  // not just the activeGateLock state-sync gap fixed earlier, but the
+  // sabotage action itself never successfully registering at all.
+  const validTypes = ["electricity", "hacker", "gateLeft", "gateRight"];
+  if (!validTypes.includes(type)) {
+    return { message: "Invalid sabotage type." };
+  }
+
+  // [BUG FIX] Server-side uses-left + cooldown enforcement - previously
+  // sabotageUsesLeft/sabotageCooldownUntil were purely client-side
+  // (matching SABOTAGE_USES = {power:3, hacker:3, gateLeft:5,
+  // gateRight:5} and SABOTAGE_COOLDOWN_MS=20000 in the frontend), which
+  // meant a page refresh silently reset a Saboteur's uses back to full
+  // and cleared any active cooldown - an exploitable way to bypass the
+  // intended per-game limits just by refreshing. The server now tracks
+  // the same counters itself and is the actual authority; the
+  // client-side checks remain too (for instant UI feedback - disabling
+  // buttons immediately rather than waiting on a round-trip), but this
+  // is what makes them impossible to bypass.
+  const now = Date.now();
+  if (!player.sabotageUses) {
+    player.sabotageUses = { electricity: 3, hacker: 3, gateLeft: 5, gateRight: 5 };
+  }
+  if ((player.sabotageUses[type] || 0) <= 0) {
+    return { message: "No uses left for that sabotage." };
+  }
+  if (player.sabotageCooldownUntil && now < player.sabotageCooldownUntil) {
+    return { message: "Sabotage is on cooldown." };
+  }
+  // Same post-kill lockdown the frontend enforces (20s after any kill,
+  // tracked separately from postKillLockUntil there - mirrored here as
+  // its own field so the server doesn't need to cross-reference the
+  // kill-cooldown timer for an unrelated rule).
+  if (player.postKillSabotageLockUntil && now < player.postKillSabotageLockUntil) {
+    return { message: "Sabotage actions are locked out after a recent kill." };
+  }
+
+  player.sabotageUses[type] -= 1;
+  player.sabotageCooldownUntil = now + 20000;
+  // [POINTS SYSTEM STEP 2] Per-match sabotage-use count, raw (capped
+  // at points-calculation time - see POINTS.saboteur.maxSabotageCounted).
+  player.sabotageActionsCount = (player.sabotageActionsCount || 0) + 1;
+
+  // [BUG FIX] Store the active sabotage on the ROOM itself (not just
+  // relay-and-forget) — this is what lets a client who missed the
+  // original broadcast (reconnecting, or a dropped packet) still learn
+  // the CURRENT state via playerListUpdated/roomJoined, instead of
+  // permanently showing gates as open (or lights as on) just because
+  // they personally never received that one specific event. Gate locks
+  // auto-expire after GATE_LOCK_DURATION_MS (30s, matching the
+  // frontend's own constant); electricity/hacker sabotages stay active
+  // until a crewmate explicitly repairs them (repairSabotage clears
+  // this the same way).
+  if (type === "gateLeft" || type === "gateRight") {
+    room.activeGateLock = { group: type === "gateLeft" ? "A" : "B", expiresAt: Date.now() + 30000 };
+    setTimeout(() => {
+      if (room.activeGateLock && room.activeGateLock.expiresAt <= Date.now()) {
+        delete room.activeGateLock;
+      }
+    }, 30000);
+  } else {
+    room.activeSabotageType = type; // "electricity" | "hacker"
+  }
+
+  // Tell everyone (including the Saboteur) that a sabotage was
+  // triggered. [BUG FIX - IDENTITY LEAK] This used to also include
+  // `triggeredBy: playerId` - since only the Saboteur can ever
+  // trigger a sabotage, broadcasting that id to the WHOLE room
+  // (crewmates included) directly exposed the Saboteur's identity to
+  // anyone who opened their browser's network inspector, regardless of
+  // whether any current UI code happened to render it. No client logic
+  // actually needs this field - removed entirely.
+  io.to(roomCode).emit("sabotageTriggered", { type });
+
+  console.log(`Sabotage "${type}" triggered by ${player.name} in room ${roomCode}`);
+  return null;
+}
+
+// [AI BOTS] Extracted from the callMeeting socket handler so bots can
+// report bodies / call meetings under the same rules as humans. Returns
+// null on success or { message, cooldownRemainingMs? } on error.
+function startMeeting(roomCode, callerId, reason, reportedBodyId) {
+  const room = rooms[roomCode];
+  if (!room) return;
+  // [BUG FIX] Same post-game-end guard as killPlayer/sabotageAction.
+  if (room.winner || !room.gameStarted) {
+    return { message: "The game has already ended." };
+  }
+
+  const caller = room.players[callerId];
+  if (!caller || !caller.alive) {
+    return { message: "You cannot call a meeting." };
+  }
+  // [BUG FIX] A Saboteur mid-vent-travel is supposed to be hidden in
+  // the walls, not physically present to slam an emergency button -
+  // same consistency fix as blocking kills/sabotage while inVent.
+  if (caller.inVent) {
+    return { message: "Cannot call a meeting while inside a vent." };
+  }
+
+  if (room.meeting) {
+    return { message: "A meeting is already in progress." };
+  }
+
+  // [NEW FEATURE - SABOTEUR CAN NOW REPORT BODIES] Saboteurs are now
+  // allowed to report a body themselves (previously crewmate-only on
+  // the frontend) - but only 15s after their own most recent kill, so
+  // they can't stand over a body, kill, and instantly "find" it as a
+  // fake alibi. Only applies to actually reporting a body (reason ===
+  // "report"); self-called emergency meetings are unaffected. Checked
+  // here server-side (not just hidden client-side) so a modified
+  // client can't skip the wait.
+  if (reason === "report" && caller.role === "saboteur" && caller.postKillReportLockUntil && Date.now() < caller.postKillReportLockUntil) {
+    return {
+      message: "You must wait before reporting this body.",
+      cooldownRemainingMs: caller.postKillReportLockUntil - Date.now(),
+    };
+  }
+
+  // Discussion cooldown: no meeting can be called within 30s of the
+  // game starting, or within 30s of the previous meeting ending. This
+  // is tracked on the room itself (meetingCooldownUntil), set both when
+  // the game starts and whenever a meeting's voting resolves (see
+  // finalizeVoting).
+  const now = Date.now();
+  if (room.meetingCooldownUntil && now < room.meetingCooldownUntil) {
+    return {
+      message: "Discussion is on cooldown.",
+      cooldownRemainingMs: room.meetingCooldownUntil - now,
+    };
+  }
+
+  room.meeting = {
+    stage: "alarm",
+    startedAt: Date.now(),
+    calledBy: callerId,
+    reason: reason || "self",
+    reportedBodyId: reportedBodyId || null,
+    messages: [],
+    votes: {},
+    skipDiscussionVotes: {},
+  };
+  // Tag this specific meeting instance so the chained timers below can
+  // tell if the room has since moved on (new meeting, or this one
+  // already resolved early via the skip-discussion path) before acting.
+  const meetingToken = room.meeting;
+
+  // [BUG FIX] Server-driven alarm -> chat transition, instead of
+  // leaving this entirely up to client-side timers.
+  setTimeout(() => {
+    if (rooms[roomCode]?.meeting !== meetingToken) return; // meeting moved on or ended
+    if (meetingToken.stage !== "alarm") return; // already advanced (e.g. by another path)
+    meetingToken.stage = "chat";
+    meetingToken.startedAt = Date.now();
+    io.to(roomCode).emit("meetingStageChanged", { stage: "chat" });
+
+    // [BUG FIX] Server-driven chat -> voting transition - this is the
+    // one that was previously ONLY ever triggered by client-side
+    // timers, which is what could leave a meeting stuck forever if
+    // every client's timer got delayed/throttled at once.
+    setTimeout(() => {
+      if (rooms[roomCode]?.meeting !== meetingToken) return;
+      if (meetingToken.stage !== "chat") return; // already moved on (e.g. 50% skip vote)
+      meetingToken.stage = "voting";
+      meetingToken.startedAt = Date.now();
+      io.to(roomCode).emit("meetingStageChanged", { stage: "voting" });
+
+      // [BUG FIX] Server-driven voting -> results. This finally
+      // guarantees results ALWAYS appear on time, independent of any
+      // client ever calling forceFinalizeVoting at all.
+      setTimeout(() => {
+        if (rooms[roomCode]?.meeting !== meetingToken) return;
+        if (meetingToken.stage !== "voting") return;
+        finalizeVoting(roomCode);
+      }, VOTING_DURATION_MS);
+    }, MEETING_CHAT_DURATION_MS);
+  }, MEETING_ALARM_DURATION_MS);
+
+  // [BUG FIX] End any active disguise right now, the moment a meeting
+  // starts - without this, the voting screen could keep showing the
+  // Saboteur under their disguised name/avatar (the frontend's voting
+  // card list uses disguiseAvatarId when present) for as long as their
+  // 15s disguise window happened to still be running, making it
+  // impossible for crewmates to correctly identify and vote them out.
+  Object.entries(room.players).forEach(([id, p]) => {
+    if (p.disguiseAvatarId) {
+      delete p.disguiseAvatarId;
+      delete p.disguiseAvatarVariantId;
+      delete p.disguiseHasPlayPass;
+      delete p.disguiseActiveUntil;
+      io.to(roomCode).emit("playerDisguiseEnded", { id });
+    }
+  });
+
+  // [DEATH ANNOUNCEMENT] List every currently-dead player by name, so
+  // the meeting's chat screen can show "X's body was found" for ALL of
+  // them at once — not just whoever specifically got reported. This is
+  // exactly what Among Us does: calling a meeting reveals every death
+  // that's happened so far, regardless of which one body triggered it.
+  const deadPlayerNames = Object.values(room.players)
+    .filter((p) => !p.alive)
+    .map((p) => p.name);
+
+  // [NEW FEATURE] Full details (name + avatar) of whichever specific
+  // body triggered this meeting (only meaningful when reason ===
+  // "report" - a self-called meeting has no reportedBodyId) - lets the
+  // Emergency Meeting popup show exactly who was found dead and by
+  // whom, with avatars, instead of just names in a plain list.
+  const reportedBody = room.meeting.reportedBodyId && room.players[room.meeting.reportedBodyId]
+    ? {
+        id: room.meeting.reportedBodyId,
+        name: room.players[room.meeting.reportedBodyId].name,
+        avatarId: room.players[room.meeting.reportedBodyId].avatarId,
+        avatarVariantId: room.players[room.meeting.reportedBodyId].avatarVariantId || null,
+        hasPlayPass: !!room.players[room.meeting.reportedBodyId].hasPlayPass,
+      }
+    : null;
+
+  io.to(roomCode).emit("meetingStarted", {
+    calledBy: callerId,
+    callerName: caller.name,
+    callerAvatarId: caller.avatarId,
+    callerAvatarVariantId: caller.avatarVariantId || null,
+    callerHasPlayPass: !!caller.hasPlayPass,
+    reason: room.meeting.reason,
+    deadPlayerNames,
+    reportedBody,
+  });
+
+  // [BUG FIX] Re-sync each Saboteur's own real sabotage-use counts and
+  // cooldowns directly to their own client. The server itself never
+  // resets these mid-game, but this guarantees the client's displayed
+  // numbers always self-correct to match server truth at this point,
+  // regardless of whatever caused them to look reset on screen.
+  Object.entries(room.players).forEach(([id, p]) => {
+    if (p.role === "saboteur" && p.alive) {
+      io.to(id).emit("sabotageStateSync", {
+        sabotageUses: p.sabotageUses || { electricity: 3, hacker: 3, gateLeft: 5, gateRight: 5 },
+        sabotageCooldownUntil: p.sabotageCooldownUntil || 0,
+        disguiseCooldownUntil: p.disguiseCooldownUntil || 0,
+        postKillSabotageLockUntil: p.postKillSabotageLockUntil || 0,
+        postKillReportLockUntil: p.postKillReportLockUntil || 0,
+      });
+    }
+  });
+
+  console.log(`Meeting called by ${caller.name} in room ${roomCode}`);
+  return null;
+}
+
+// [AI BOTS] A crew bot finished one of its missions - same bookkeeping a
+// human's reportMissionProgress ends up doing (progress bar + win check).
+function completeBotMission(roomCode, botId) {
+  const room = rooms[roomCode];
+  if (!room || !room.gameStarted || room.winner) return;
+  const p = room.players[botId];
+  if (!p || !p.isBot || p.role !== "crewmate") return; // ghosts can still finish missions, like humans
+  const now = Date.now();
+  p.missionsDone = Math.min((p.missionsDone || 0) + 1, p.missionsTotal || 0);
+  p.lastMissionCompletedAt = now;
+  p.lastMissionActivityAt = now;
+  broadcastCrewProgress(roomCode);
+  checkWinCondition(roomCode);
+}
+bots.setHooks({
+  performKill,
+  performSabotage,
+  startMeeting,
+  completeMission: completeBotMission,
+  killRangePx: SERVER_KILL_RANGE_PX,
+});
+
 io.on("connection", (socket) => {
   console.log("Player connected:", socket.id);
 
@@ -10194,151 +10644,8 @@ io.on("connection", (socket) => {
   // client's own claim of "I'm the Saboteur" - room.players[socket.id].role
   // is what's stored server-side and authoritative.
   socket.on("killPlayer", ({ targetId }) => {
-    const roomCode = socket.data.roomCode;
-    const room = rooms[roomCode];
-    if (!room) return;
-    // [BUG FIX] Reject any game action once the game has already ended -
-    // see the comment above this handler for why.
-    if (room.winner || !room.gameStarted) {
-      socket.emit("killError", { message: "The game has already ended." });
-      return;
-    }
-
-    const killer = room.players[socket.id];
-    const target = room.players[targetId];
-
-    // Security checks - the server verifies this itself, never trusting the client
-    if (!killer || killer.role !== "saboteur") {
-      socket.emit("killError", { message: "You are not the Saboteur." });
-      return;
-    }
-    // [BUG FIX] No kill checks ever stopped this from happening DURING an
-    // active meeting (alarm/chat/voting) - everyone's frozen on the
-    // meeting screen at that point and shouldn't be killable at all, same
-    // as Among Us. A modified client could otherwise sneak a kill in
-    // mid-discussion.
-    if (room.meeting) {
-      socket.emit("killError", { message: "Cannot kill during a meeting." });
-      return;
-    }
-    // [BUG FIX] Same logic as the meeting-block above - a Saboteur who's
-    // currently inside a vent (between an 'enter' and matching 'exit')
-    // shouldn't be able to kill, since they're supposed to be physically
-    // tucked away in the walls at that moment, not standing next to
-    // anyone.
-    if (killer.inVent) {
-      socket.emit("killError", { message: "Cannot kill while inside a vent." });
-      return;
-    }
-    if (!killer.alive) {
-      socket.emit("killError", { message: "You are already dead." });
-      return;
-    }
-    if (!target || !target.alive) {
-      socket.emit("killError", { message: "Target is not valid." });
-      return;
-    }
-    if (target.role === "saboteur") {
-      socket.emit("killError", { message: "The Saboteur cannot kill another Saboteur." });
-      return;
-    }
-    // [BUG FIX] Server-side proximity check - the killer's and target's
-    // last-known positions (kept up to date via every playerMove) must be
-    // within SERVER_KILL_RANGE_PX of each other. Without this, the only
-    // thing stopping a remote/cross-map kill was the frontend's own
-    // button-visibility logic, which a modified client trivially bypasses
-    // by just emitting killPlayer directly.
-    if (
-      typeof killer.x !== "number" || typeof killer.y !== "number" ||
-      typeof target.x !== "number" || typeof target.y !== "number" ||
-      Math.hypot(killer.x - target.x, killer.y - target.y) > SERVER_KILL_RANGE_PX
-    ) {
-      socket.emit("killError", { message: "Target is too far away." });
-      return;
-    }
-    // Server-side cooldown enforcement (20s) - mirrors the client's own
-    // KILL_COOLDOWN_MS, but checked here too so a modified client can't
-    // bypass the cooldown by just not enforcing it locally.
-    // [UPDATE] Standardized to 20s (was 25s) to match the same cooldown
-    // now also applied at game start and at the end of every meeting -
-    // one consistent number everywhere, per Om7eth's explicit request.
-    const now = Date.now();
-    if (killer.killCooldownUntil && now < killer.killCooldownUntil) {
-      socket.emit("killError", { message: "Kill is still on cooldown." });
-      return;
-    }
-    killer.killCooldownUntil = now + 20000;
-    // [BUG FIX] Server-side mirror of the frontend's postKillLockUntil
-    // (20s sabotage lockdown after any kill) - set here so the
-    // server-side sabotage check above can actually enforce it too,
-    // not just block based on its own independent cooldown.
-    killer.postKillSabotageLockUntil = now + 20000;
-    // [NEW FEATURE - SABOTEUR CAN NOW REPORT BODIES] Saboteurs can report
-    // a dead body themselves now (see callMeeting), but reporting the
-    // instant after a kill would be an obvious fake-alibi exploit - stand
-    // over the body, kill, immediately report, look like you "found" it.
-    // This 15s lockout (server-authoritative, checked in callMeeting)
-    // forces a believable gap before the killer themself can be the one
-    // to call it in.
-    killer.postKillReportLockUntil = now + 15000;
-    // [UPDATE] Team-wide, not per-killer - ANY Saboteur landing a kill
-    // satisfies the whole team's kill-timer deadline (see the
-    // saboteurKillTimer interval near the bottom of this file), not just
-    // this specific one.
-    room.saboteurTeamHasKilled = true;
-    // [BUG-PROOFING] If someone OTHER than the currently at-risk
-    // Saboteur got this kill, that at-risk Saboteur's screen may already
-    // be mid-countdown - tell them specifically to clear it now, rather
-    // than leaving a scary countdown ticking toward a deadline that (per
-    // the check above) can no longer actually eliminate them.
-    if (room.saboteurAtRiskId && room.saboteurAtRiskId !== socket.id) {
-      io.to(room.saboteurAtRiskId).emit("saboteurTimerCleared");
-    }
-
-    target.alive = false;
-    // [POINTS SYSTEM STEP 2] Per-match kill count for this Saboteur -
-    // capped (see POINTS.saboteur.maxKillsCounted) when points are
-    // actually calculated, not here - this just records the raw count.
-    killer.killsCount = (killer.killsCount || 0) + 1;
-    // Store where the body fell — sent to everyone below (bodyDropped),
-    // but that event ONLY carries position/avatar data, never a
-    // notification or popup. Each client decides entirely on its own,
-    // locally, whether to show a Report button/popup based on whether
-    // THEIR OWN player is currently standing close to it — exactly the
-    // same proximity check (canReportBody/nearestReportableBody) already
-    // used elsewhere in the game. No other player's screen is ever told
-    // "someone found a body" by the server.
-    target.bodyX = target.x;
-    target.bodyY = target.y;
-
-    // [FAIRNESS FIX] Only the killer and the victim see the kill cutscene
-    // and learn about it right away — exactly like Among Us, nobody else
-    // in the room is told anything here.
-    io.to(socket.id).emit("playerKilled", { targetId, killerId: socket.id });
-    io.to(targetId).emit("playerKilled", { targetId, killerId: socket.id });
-    // [BUG FIX] A player who just died had no way to see ghost chat
-    // history from before their death - they'd only get messages going
-    // forward via the live listener. Send them the existing backlog now.
-    io.to(targetId).emit("ghostChatBacklog", { messages: room.ghostChat || [] });
-
-    // Everyone else (and the killer/victim too) gets the body's raw
-    // position/avatar data so it can render on their map once they're
-    // close enough to see it for themselves — same as how any other
-    // player's position is just data, not an announcement.
-    socket.to(roomCode).emit("bodyDropped", {
-      bodyOwnerId: targetId,
-      x: target.bodyX,
-      y: target.bodyY,
-      avatarId: target.avatarId,
-      avatarVariantId: target.avatarVariantId || null,
-    });
-
-    console.log(`${target.name} was killed by ${killer.name} in room ${roomCode}`);
-
-    // [WIN CONDITION] A kill can immediately end the game if crewmates
-    // are now too few relative to Saboteurs - check right away rather
-    // than waiting for the next meeting.
-    checkWinCondition(roomCode);
+    const err = performKill(socket.data.roomCode, socket.id, targetId);
+    if (err) socket.emit("killError", err);
   });
 
   // ---- SABOTAGE ACTION (Saboteur only) ----
@@ -10347,121 +10654,8 @@ io.on("connection", (socket) => {
   // player. Cooldown/timing logic still lives client-side (already built
   // into the frontend) - the server just broadcasts "this action happened".
   socket.on("sabotageAction", ({ type }) => {
-    const roomCode = socket.data.roomCode;
-    const room = rooms[roomCode];
-    if (!room) return;
-    // [BUG FIX] Same post-game-end guard as killPlayer.
-    if (room.winner || !room.gameStarted) {
-      socket.emit("sabotageError", { message: "The game has already ended." });
-      return;
-    }
-
-    const player = room.players[socket.id];
-
-    if (!player || player.role !== "saboteur") {
-      socket.emit("sabotageError", { message: "You are not the Saboteur." });
-      return;
-    }
-    if (!player.alive) {
-      socket.emit("sabotageError", { message: "You are already dead." });
-      return;
-    }
-    // [BUG FIX] Same fix as killPlayer - sabotage shouldn't be triggerable
-    // while everyone's frozen in an active meeting either.
-    if (room.meeting) {
-      socket.emit("sabotageError", { message: "Cannot sabotage during a meeting." });
-      return;
-    }
-    if (player.inVent) {
-      socket.emit("sabotageError", { message: "Cannot sabotage while inside a vent." });
-      return;
-    }
-
-    // [BUG FIX] Was "lockLeft"/"lockRight" here, but the frontend has
-    // always sent "gateLeft"/"gateRight" (see triggerSabotageAction's
-    // key->serverType mapping) - meaning EVERY gate-lock sabotage attempt
-    // was silently failing this validTypes check and returning a
-    // sabotageError the whole time, never actually reaching the code
-    // below that's supposed to set room.activeGateLock. This was a
-    // contributing root cause of "gate lock doesn't work for anyone" -
-    // not just the activeGateLock state-sync gap fixed earlier, but the
-    // sabotage action itself never successfully registering at all.
-    const validTypes = ["electricity", "hacker", "gateLeft", "gateRight"];
-    if (!validTypes.includes(type)) {
-      socket.emit("sabotageError", { message: "Invalid sabotage type." });
-      return;
-    }
-
-    // [BUG FIX] Server-side uses-left + cooldown enforcement - previously
-    // sabotageUsesLeft/sabotageCooldownUntil were purely client-side
-    // (matching SABOTAGE_USES = {power:3, hacker:3, gateLeft:5,
-    // gateRight:5} and SABOTAGE_COOLDOWN_MS=20000 in the frontend), which
-    // meant a page refresh silently reset a Saboteur's uses back to full
-    // and cleared any active cooldown - an exploitable way to bypass the
-    // intended per-game limits just by refreshing. The server now tracks
-    // the same counters itself and is the actual authority; the
-    // client-side checks remain too (for instant UI feedback - disabling
-    // buttons immediately rather than waiting on a round-trip), but this
-    // is what makes them impossible to bypass.
-    const now = Date.now();
-    if (!player.sabotageUses) {
-      player.sabotageUses = { electricity: 3, hacker: 3, gateLeft: 5, gateRight: 5 };
-    }
-    if ((player.sabotageUses[type] || 0) <= 0) {
-      socket.emit("sabotageError", { message: "No uses left for that sabotage." });
-      return;
-    }
-    if (player.sabotageCooldownUntil && now < player.sabotageCooldownUntil) {
-      socket.emit("sabotageError", { message: "Sabotage is on cooldown." });
-      return;
-    }
-    // Same post-kill lockdown the frontend enforces (20s after any kill,
-    // tracked separately from postKillLockUntil there - mirrored here as
-    // its own field so the server doesn't need to cross-reference the
-    // kill-cooldown timer for an unrelated rule).
-    if (player.postKillSabotageLockUntil && now < player.postKillSabotageLockUntil) {
-      socket.emit("sabotageError", { message: "Sabotage actions are locked out after a recent kill." });
-      return;
-    }
-
-    player.sabotageUses[type] -= 1;
-    player.sabotageCooldownUntil = now + 20000;
-    // [POINTS SYSTEM STEP 2] Per-match sabotage-use count, raw (capped
-    // at points-calculation time - see POINTS.saboteur.maxSabotageCounted).
-    player.sabotageActionsCount = (player.sabotageActionsCount || 0) + 1;
-
-    // [BUG FIX] Store the active sabotage on the ROOM itself (not just
-    // relay-and-forget) — this is what lets a client who missed the
-    // original broadcast (reconnecting, or a dropped packet) still learn
-    // the CURRENT state via playerListUpdated/roomJoined, instead of
-    // permanently showing gates as open (or lights as on) just because
-    // they personally never received that one specific event. Gate locks
-    // auto-expire after GATE_LOCK_DURATION_MS (30s, matching the
-    // frontend's own constant); electricity/hacker sabotages stay active
-    // until a crewmate explicitly repairs them (repairSabotage clears
-    // this the same way).
-    if (type === "gateLeft" || type === "gateRight") {
-      room.activeGateLock = { group: type === "gateLeft" ? "A" : "B", expiresAt: Date.now() + 30000 };
-      setTimeout(() => {
-        if (room.activeGateLock && room.activeGateLock.expiresAt <= Date.now()) {
-          delete room.activeGateLock;
-        }
-      }, 30000);
-    } else {
-      room.activeSabotageType = type; // "electricity" | "hacker"
-    }
-
-    // Tell everyone (including the Saboteur) that a sabotage was
-    // triggered. [BUG FIX - IDENTITY LEAK] This used to also include
-    // `triggeredBy: socket.id` - since only the Saboteur can ever
-    // trigger a sabotage, broadcasting that id to the WHOLE room
-    // (crewmates included) directly exposed the Saboteur's identity to
-    // anyone who opened their browser's network inspector, regardless of
-    // whether any current UI code happened to render it. No client logic
-    // actually needs this field - removed entirely.
-    io.to(roomCode).emit("sabotageTriggered", { type });
-
-    console.log(`Sabotage "${type}" triggered by ${player.name} in room ${roomCode}`);
+    const err = performSabotage(socket.data.roomCode, socket.id, type);
+    if (err) socket.emit("sabotageError", err);
   });
 
   // ---- REPAIR SABOTAGE (any alive crewmate) ----
@@ -10758,178 +10952,8 @@ io.on("connection", (socket) => {
   // [MULTIPLAYER: SHARED] - meeting state is stored on the room so a
   // new/refreshed player can also learn the current stage.
   socket.on("callMeeting", ({ reason, reportedBodyId }) => {
-    const roomCode = socket.data.roomCode;
-    const room = rooms[roomCode];
-    if (!room) return;
-    // [BUG FIX] Same post-game-end guard as killPlayer/sabotageAction.
-    if (room.winner || !room.gameStarted) {
-      socket.emit("meetingError", { message: "The game has already ended." });
-      return;
-    }
-
-    const caller = room.players[socket.id];
-    if (!caller || !caller.alive) {
-      socket.emit("meetingError", { message: "You cannot call a meeting." });
-      return;
-    }
-    // [BUG FIX] A Saboteur mid-vent-travel is supposed to be hidden in
-    // the walls, not physically present to slam an emergency button -
-    // same consistency fix as blocking kills/sabotage while inVent.
-    if (caller.inVent) {
-      socket.emit("meetingError", { message: "Cannot call a meeting while inside a vent." });
-      return;
-    }
-
-    if (room.meeting) {
-      socket.emit("meetingError", { message: "A meeting is already in progress." });
-      return;
-    }
-
-    // [NEW FEATURE - SABOTEUR CAN NOW REPORT BODIES] Saboteurs are now
-    // allowed to report a body themselves (previously crewmate-only on
-    // the frontend) - but only 15s after their own most recent kill, so
-    // they can't stand over a body, kill, and instantly "find" it as a
-    // fake alibi. Only applies to actually reporting a body (reason ===
-    // "report"); self-called emergency meetings are unaffected. Checked
-    // here server-side (not just hidden client-side) so a modified
-    // client can't skip the wait.
-    if (reason === "report" && caller.role === "saboteur" && caller.postKillReportLockUntil && Date.now() < caller.postKillReportLockUntil) {
-      socket.emit("meetingError", {
-        message: "You must wait before reporting this body.",
-        cooldownRemainingMs: caller.postKillReportLockUntil - Date.now(),
-      });
-      return;
-    }
-
-    // Discussion cooldown: no meeting can be called within 30s of the
-    // game starting, or within 30s of the previous meeting ending. This
-    // is tracked on the room itself (meetingCooldownUntil), set both when
-    // the game starts and whenever a meeting's voting resolves (see
-    // finalizeVoting).
-    const now = Date.now();
-    if (room.meetingCooldownUntil && now < room.meetingCooldownUntil) {
-      socket.emit("meetingError", {
-        message: "Discussion is on cooldown.",
-        cooldownRemainingMs: room.meetingCooldownUntil - now,
-      });
-      return;
-    }
-
-    room.meeting = {
-      stage: "alarm",
-      startedAt: Date.now(),
-      calledBy: socket.id,
-      reason: reason || "self",
-      reportedBodyId: reportedBodyId || null,
-      messages: [],
-      votes: {},
-      skipDiscussionVotes: {},
-    };
-    // Tag this specific meeting instance so the chained timers below can
-    // tell if the room has since moved on (new meeting, or this one
-    // already resolved early via the skip-discussion path) before acting.
-    const meetingToken = room.meeting;
-
-    // [BUG FIX] Server-driven alarm -> chat transition, instead of
-    // leaving this entirely up to client-side timers.
-    setTimeout(() => {
-      if (rooms[roomCode]?.meeting !== meetingToken) return; // meeting moved on or ended
-      if (meetingToken.stage !== "alarm") return; // already advanced (e.g. by another path)
-      meetingToken.stage = "chat";
-      meetingToken.startedAt = Date.now();
-      io.to(roomCode).emit("meetingStageChanged", { stage: "chat" });
-
-      // [BUG FIX] Server-driven chat -> voting transition - this is the
-      // one that was previously ONLY ever triggered by client-side
-      // timers, which is what could leave a meeting stuck forever if
-      // every client's timer got delayed/throttled at once.
-      setTimeout(() => {
-        if (rooms[roomCode]?.meeting !== meetingToken) return;
-        if (meetingToken.stage !== "chat") return; // already moved on (e.g. 50% skip vote)
-        meetingToken.stage = "voting";
-        meetingToken.startedAt = Date.now();
-        io.to(roomCode).emit("meetingStageChanged", { stage: "voting" });
-
-        // [BUG FIX] Server-driven voting -> results. This finally
-        // guarantees results ALWAYS appear on time, independent of any
-        // client ever calling forceFinalizeVoting at all.
-        setTimeout(() => {
-          if (rooms[roomCode]?.meeting !== meetingToken) return;
-          if (meetingToken.stage !== "voting") return;
-          finalizeVoting(roomCode);
-        }, VOTING_DURATION_MS);
-      }, MEETING_CHAT_DURATION_MS);
-    }, MEETING_ALARM_DURATION_MS);
-
-    // [BUG FIX] End any active disguise right now, the moment a meeting
-    // starts - without this, the voting screen could keep showing the
-    // Saboteur under their disguised name/avatar (the frontend's voting
-    // card list uses disguiseAvatarId when present) for as long as their
-    // 15s disguise window happened to still be running, making it
-    // impossible for crewmates to correctly identify and vote them out.
-    Object.entries(room.players).forEach(([id, p]) => {
-      if (p.disguiseAvatarId) {
-        delete p.disguiseAvatarId;
-        delete p.disguiseAvatarVariantId;
-        delete p.disguiseHasPlayPass;
-        delete p.disguiseActiveUntil;
-        io.to(roomCode).emit("playerDisguiseEnded", { id });
-      }
-    });
-
-    // [DEATH ANNOUNCEMENT] List every currently-dead player by name, so
-    // the meeting's chat screen can show "X's body was found" for ALL of
-    // them at once — not just whoever specifically got reported. This is
-    // exactly what Among Us does: calling a meeting reveals every death
-    // that's happened so far, regardless of which one body triggered it.
-    const deadPlayerNames = Object.values(room.players)
-      .filter((p) => !p.alive)
-      .map((p) => p.name);
-
-    // [NEW FEATURE] Full details (name + avatar) of whichever specific
-    // body triggered this meeting (only meaningful when reason ===
-    // "report" - a self-called meeting has no reportedBodyId) - lets the
-    // Emergency Meeting popup show exactly who was found dead and by
-    // whom, with avatars, instead of just names in a plain list.
-    const reportedBody = room.meeting.reportedBodyId && room.players[room.meeting.reportedBodyId]
-      ? {
-          id: room.meeting.reportedBodyId,
-          name: room.players[room.meeting.reportedBodyId].name,
-          avatarId: room.players[room.meeting.reportedBodyId].avatarId,
-          avatarVariantId: room.players[room.meeting.reportedBodyId].avatarVariantId || null,
-          hasPlayPass: !!room.players[room.meeting.reportedBodyId].hasPlayPass,
-        }
-      : null;
-
-    io.to(roomCode).emit("meetingStarted", {
-      calledBy: socket.id,
-      callerName: caller.name,
-      callerAvatarId: caller.avatarId,
-      callerAvatarVariantId: caller.avatarVariantId || null,
-      callerHasPlayPass: !!caller.hasPlayPass,
-      reason: room.meeting.reason,
-      deadPlayerNames,
-      reportedBody,
-    });
-
-    // [BUG FIX] Re-sync each Saboteur's own real sabotage-use counts and
-    // cooldowns directly to their own client. The server itself never
-    // resets these mid-game, but this guarantees the client's displayed
-    // numbers always self-correct to match server truth at this point,
-    // regardless of whatever caused them to look reset on screen.
-    Object.entries(room.players).forEach(([id, p]) => {
-      if (p.role === "saboteur" && p.alive) {
-        io.to(id).emit("sabotageStateSync", {
-          sabotageUses: p.sabotageUses || { electricity: 3, hacker: 3, gateLeft: 5, gateRight: 5 },
-          sabotageCooldownUntil: p.sabotageCooldownUntil || 0,
-          disguiseCooldownUntil: p.disguiseCooldownUntil || 0,
-          postKillSabotageLockUntil: p.postKillSabotageLockUntil || 0,
-          postKillReportLockUntil: p.postKillReportLockUntil || 0,
-        });
-      }
-    });
-
-    console.log(`Meeting called by ${caller.name} in room ${roomCode}`);
+    const err = startMeeting(socket.data.roomCode, socket.id, reason, reportedBodyId);
+    if (err) socket.emit("meetingError", err);
   });
 
   // ---- SKIP DISCUSSION VOTE (during the chat stage) ----
