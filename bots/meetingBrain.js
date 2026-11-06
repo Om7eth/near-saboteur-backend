@@ -13,7 +13,11 @@
 //
 // Env (all optional):
 //   NEAR_AI_API_KEY   - enables the LLM (otherwise rule-based fallback)
-//   NEAR_AI_MODEL     - default "z-ai/glm-5.3-flash" (verifiable/TEE model)
+//   NEAR_AI_MODEL     - default "Qwen/Qwen3.6-35B-A3B-FP8" (verifiable/TEE
+//                       model; picked after testing real meeting prompts:
+//                       ~0.7s replies, natural Hinglish/Hindi, uses memory well)
+//   NEAR_AI_THINKING  - "off" (default) sends enable_thinking:false so the
+//                       model answers right away instead of reasoning first
 //   NEAR_AI_BASE_URL  - default "https://cloud-api.near.ai/v1"
 //   NEAR_AI_DAILY_BUDGET_USD    - default 1 (UTC day); then rule-based lines
 //   NEAR_AI_MAX_CALLS_PER_MEETING - default 8 per meeting (whole room)
@@ -30,14 +34,15 @@ const B = require("./brain");
 const FC = require("./fallbackChat");
 
 const API_KEY = process.env.NEAR_AI_API_KEY || "";
-const MODEL = process.env.NEAR_AI_MODEL || "z-ai/glm-5.3-flash";
+const MODEL = process.env.NEAR_AI_MODEL || "Qwen/Qwen3.6-35B-A3B-FP8";
+const THINKING_OFF = (process.env.NEAR_AI_THINKING || "off") !== "on";
 const BASE_URL = (process.env.NEAR_AI_BASE_URL || "https://cloud-api.near.ai/v1").replace(/\/$/, "");
 const AI_TIMEOUT_MS = 9000;
 const SLOW_REPLY_FILLER_MS = 5000;
 const DAILY_BUDGET_USD = Number(process.env.NEAR_AI_DAILY_BUDGET_USD || 1);
 const MAX_AI_CALLS_PER_MEETING = Number(process.env.NEAR_AI_MAX_CALLS_PER_MEETING || 8);
 // $ per 1M tokens; refreshed from NEAR AI's public model list at startup.
-let price = { input: 0.08, output: 0.5 };
+let price = { input: 0.17, output: 1.1 };
 const stats = { day: "", spendUsd: 0, calls: 0, failures: 0, fallbacks: 0, budgetHitLogged: false };
 // Out of NEAR AI credits (HTTP 402): pause AI calls for a while instead of
 // hitting the API on every meeting. Staking credits accrue per second, so
@@ -54,7 +59,7 @@ if (API_KEY) {
     if (m) {
       const per = (c) => (c.amount / 10 ** c.scale) * 1e6;
       price = { input: per(m.inputCostPerToken), output: per(m.outputCostPerToken) };
-      console.log(`[BOTS-AI] ${MODEL} price: $${price.input}/M in, $${price.output}/M out; daily budget $${DAILY_BUDGET_USD}`);
+      console.log(`[BOTS-AI] ${MODEL} price: $${+price.input.toFixed(3)}/M in, $${+price.output.toFixed(3)}/M out; daily budget $${DAILY_BUDGET_USD}`);
     }
   }).catch(() => { /* keep defaults */ });
 }
@@ -132,6 +137,9 @@ async function callNearAI(system, user) {
         max_tokens: 400,
         temperature: 0.85,
         response_format: { type: "json_object" },
+        // Reasoning models otherwise spend the whole token budget "thinking"
+        // and reply late or empty; a quick chat line doesn't need it.
+        ...(THINKING_OFF ? { chat_template_kwargs: { enable_thinking: false } } : {}),
       }),
       signal: ctrl.signal,
     });
@@ -206,6 +214,7 @@ function systemPrompt(ctx) {
     role,
     `Personality: ${personaFor(ctx.me.name)}.`,
     "Write like a real player in a fast game chat: ONE short message (max ~18 words), no lists, no narration, no quotes, react to what others just said, use player names. It's fine to stay silent if you have nothing useful.",
+    "Never quote exact times or seconds from your memory (no \"44s\"); say it like a person would: \"just now\", \"a bit before\", \"earlier\" (or the same in the chat's language).",
     lang,
     'Answer ONLY with JSON: {"say": "<your chat message, or empty string to stay silent>", "vote": "<exact name of a living player, or skip>", "suspect": "<name or none>"}',
   ].join("\n");
