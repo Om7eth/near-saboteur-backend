@@ -360,7 +360,8 @@ function arrive(roomCode, room, id, p, brain, now) {
           (p.missionsList || []).forEach((m) => { if (m.room === t.room) m.done = true; });
           if (hooks.completeMission) hooks.completeMission(roomCode, id);
         }
-        B.remember(brain, { kind: "did", what: B.MISSION_LABEL[t.room] || "a mission", where: B.ROOM_NAME[t.room] || t.room, fake: p.role !== "crewmate" });
+        const label = B.MISSION_LABEL[t.room] || "a mission";
+        B.remember(brain, { kind: "did", what: label, en: "doing " + label, hi: label + " kar raha tha", where: B.ROOM_NAME[t.room] || t.room, fake: p.role !== "crewmate" });
       }
       brain.mode = "idle";
       brain.waitUntil = now + rand(400, 1800);
@@ -371,7 +372,7 @@ function arrive(roomCode, room, id, p, brain, now) {
       brain.watchUntil = now + rand(8000, 15000);
       brain.waitUntil = brain.watchUntil;
       brain.lastCamsAt = now;
-      B.remember(brain, { kind: "did", what: "watched the cameras", where: "Security" });
+      B.remember(brain, { kind: "did", what: "watched the cameras", en: "watching the cameras", hi: "cameras dekh raha tha", where: "Security" });
       return;
     case "cameras":
       brain.mode = "idle";

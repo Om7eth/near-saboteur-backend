@@ -27,6 +27,7 @@
 // NEAR AI's stake-to-compute (staking yield turned into credits).
 // ============================================================
 const B = require("./brain");
+const FC = require("./fallbackChat");
 
 const API_KEY = process.env.NEAR_AI_API_KEY || "";
 const MODEL = process.env.NEAR_AI_MODEL || "z-ai/glm-5.3-flash";
@@ -63,8 +64,12 @@ const rand = B.rand;
 const chance = B.chance;
 
 // ---- Language ---------------------------------------------------------
-const HINGLISH_WORDS = new Set(["hai", "hain", "nahi", "nhi", "kya", "kyu", "kyun", "bhai", "mai", "main", "mein", "tha", "thi", "dekha", "kaha", "kaun", "kon", "tum", "tu", "mera", "tera", "aur", "koi", "abhi", "yaar", "haan", "ha", "kar", "raha", "rha", "wala", "isko", "usko", "pe", "se", "ko", "toh", "to", "bol", "bata", "sab", "kidhar", "idhar", "udhar", "sus"]);
+const HINGLISH_WORDS = new Set(["kahan", "rahe", "rahi", "ho", "lag", "gaya", "gayi", "kiya", "kyon", "matlab", "sach", "jhooth", "dekh", "chal", "mat", "karo", "bolo", "kuch", "nahin", "accha", "acha", "bas", "hum", "humne", "maine", "usne", "hai", "hain", "nahi", "nhi", "kya", "kyu", "kyun", "bhai", "mai", "main", "mein", "tha", "thi", "dekha", "kaha", "kaun", "kon", "tum", "tu", "mera", "tera", "aur", "koi", "abhi", "yaar", "haan", "ha", "kar", "raha", "rha", "wala", "isko", "usko", "pe", "se", "ko", "toh", "to", "bol", "bata", "sab", "kidhar", "idhar", "udhar", "sus"]);
 function detectLanguage(texts) {
+  if (texts.length > 1) {
+    const last = detectLanguage([texts[texts.length - 1]]);
+    if (last !== "english") return last;
+  }
   const joined = texts.join(" ");
   if (/[ऀ-ॿ]/.test(joined)) return "hindi";
   const words = joined.toLowerCase().split(/[^a-z]+/).filter(Boolean);
@@ -191,7 +196,7 @@ function systemPrompt(ctx) {
     'Answer ONLY with JSON: {"say": "<your chat message, or empty string to stay silent>", "vote": "<exact name of a living player, or skip>", "suspect": "<name or none>"}',
   ].join("\n");
 }
-function userPrompt(ctx, alreadySaid) {
+function userPrompt(ctx, alreadySaid, trigger, othersSaid) {
   return [
     `Meeting: ${ctx.reason}.`,
     `Alive: ${ctx.alive.map(([, p]) => p.name + (p === ctx.me ? " (you)" : "")).join(", ")}.`,
@@ -203,6 +208,8 @@ function userPrompt(ctx, alreadySaid) {
     "Chat so far:",
     ...(ctx.chat.length ? ctx.chat : ["(no messages yet)"]),
     alreadySaid.length ? `\nYou already said: ${alreadySaid.map((t) => `"${t}"`).join(" ")} - don't repeat yourself.` : "",
+    othersSaid && othersSaid.length ? `Other bots already said: ${othersSaid.map((t) => `"${t}"`).join(" ")} - don't repeat or paraphrase them.` : "",
+    trigger ? `\nReply to this message: ${trigger.fromName}: "${trigger.text}" (answer what they actually asked - a question is not an accusation).` : "",
   ].join("\n");
 }
 
@@ -268,7 +275,7 @@ function fallbackThink(ctx, memory, alreadySaid, mentioned) {
 function stateFor(roomCode, room) {
   let st = rooms.get(roomCode);
   if (!st || st.meetingRef !== room.meeting) {
-    st = { meetingRef: room.meeting, bots: {}, lastBotMsgAt: 0, chatStartedAt: 0, aiCalls: 0 };
+    st = { meetingRef: room.meeting, bots: {}, lastBotMsgAt: 0, chatStartedAt: 0, aiCalls: 0, used: new Set(), botLines: [] };
     rooms.set(roomCode, st);
   }
   return st;
@@ -282,20 +289,22 @@ async function think(room, roomCode, botId, memory, bs, now, st, purpose) {
   const ctx = buildContext(room, botId, memory, now);
   const mentioned = bs.mentioned;
   bs.mentioned = false;
+  const trigger = bs.trigger || null;
+  bs.trigger = null;
   let out = null, source = "fallback";
   // Spend AI calls where they matter: openings by bots with news, and
   // replies when someone talks to the bot. Quiet votes/small talk: rules.
   const worthIt = purpose === "reply" || (purpose === "open" && bs.hasNews) || (purpose === "chime" && bs.said.length === 0);
   if (worthIt && aiAllowed(st)) {
     try {
-      out = await callNearAI(systemPrompt(ctx), userPrompt(ctx, bs.said));
+      out = await callNearAI(systemPrompt(ctx), userPrompt(ctx, bs.said, trigger, st ? st.botLines : []));
       source = "near-ai";
     } catch (e) {
       stats.failures++;
       console.warn(`[BOTS-AI] ${ctx.me.name}: NEAR AI call failed (${e.name === "AbortError" ? "timeout" : e.message}) - using fallback`);
     }
   }
-  if (!out || typeof out !== "object") { stats.fallbacks++; out = fallbackThink(ctx, memory, bs.said, mentioned); }
+  if (!out || typeof out !== "object") { stats.fallbacks++; out = FC.respond(ctx, memory, bs.said, trigger, st ? st.used : new Set()); }
   let say = typeof out.say === "string" ? out.say.trim() : "";
   // Models sometimes prefix their own name ("Nova: ...") or wrap in quotes.
   const esc = ctx.me.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -336,9 +345,12 @@ function tick(roomCode, room, now, api) {
         if (now - st.lastBotMsgAt >= MIN_GAP_BETWEEN_BOT_MSGS_MS) {
           const text = bs.pendingSay.text;
           bs.pendingSay = null;
+          if (st.used.has(FC.norm(text))) continue; // never repeat a line in the same meeting
           const res = api.postMeetingChat(roomCode, id, text, null, null);
           if (res && res.senderId) {
             bs.said.push(text);
+            st.used.add(FC.norm(text));
+            st.botLines.push(text);
             st.lastBotMsgAt = now;
           }
         } else {
@@ -347,7 +359,7 @@ function tick(roomCode, room, now, api) {
         continue;
       }
       if (bs.busy || bs.pendingSay || !bs.nextActAt || now < bs.nextActAt) continue;
-      if (bs.said.length >= MAX_MSGS_PER_BOT) { bs.nextActAt = 0; continue; }
+      if (bs.said.length >= MAX_MSGS_PER_BOT || (bs.said.length >= 2 && bs.purpose !== "reply")) { bs.nextActAt = 0; continue; }
       bs.busy = true;
       bs.nextActAt = 0;
       const purpose = bs.purpose || "chime";
@@ -428,8 +440,10 @@ function onChat(roomCode, room, message) {
     if (named) {
       bs.mentioned = true;
       bs.purpose = "reply";
+      bs.trigger = { text: message.text || "", fromName: message.senderName };
       bs.nextActAt = now + rand(1500, 4000);
     } else if (!fromBot && (isQuestion ? chance(0.45) : chance(0.25))) {
+      bs.trigger = { text: message.text || "", fromName: message.senderName };
       if (!bs.nextActAt || bs.nextActAt > now + 12000) bs.nextActAt = now + rand(4000, 11000);
     } else if (fromBot && chance(0.12)) {
       if (!bs.nextActAt) bs.nextActAt = now + rand(6000, 14000);
