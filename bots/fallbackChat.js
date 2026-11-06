@@ -63,6 +63,9 @@ const T = {
     hold: (x) => [`reporting doesn't clear ${x} tho`, `still not sure about ${x}`],
     skipYes: () => ["yeah skip, no info", "skip for now", "ok skip"],
     skipNo: (x) => [`no don't skip, vote ${x}`, `wait, i think it's ${x}`],
+    callerWhy: (c, tag) => [`${tag}why'd you call it?`, `${tag}what happened? saw something?`, `${tag}what's up, anything?`],
+    calmNothing: () => ["nobody's dead yet, nothing to go on", "all quiet on my side, skip?", "no one died yet, let's skip"],
+    calmWho: () => ["no one's dead yet lol", "nothing's happened yet, skip", "nobody to suspect yet"],
   },
   hinglish: {
     sawKill: (k, v, w, cam) => [`${cam ? "camera pe" : "maine"} khud dekha ${k} ne ${v} ko ${w} mein maara`, `${k} hai bhai, ${w} mein ${v} ko maarte dekha${cam ? " camera pe" : ""}`, `${k} ne maara ${v} ko, main wahin ${w} mein tha`],
@@ -80,6 +83,9 @@ const T = {
     hold: (x) => [`report karne se ${x} clear nahi hota`, `${x} pe abhi bhi doubt hai`],
     skipYes: () => ["haan skip karo, info nahi hai", "abhi skip", "ok skip"],
     skipNo: (x) => [`skip mat karo, ${x} ko vote karo`, `ruko, mujhe lagta hai ${x} hai`],
+    callerWhy: (c, tag) => [`${tag}meeting kyun bulayi?`, `${tag}kya hua? kuch dekha kya?`, `${tag}kya scene hai, kuch mila?`],
+    calmNothing: () => ["abhi tak koi mara hi nahi, kuch info nahi", "mere side sab normal hai, skip?", "koi nahi mara, skip karte hain"],
+    calmWho: () => ["abhi koi mara hi nahi yaar", "kuch hua hi nahi abhi, skip", "abhi kisi pe shak ka reason nahi"],
   },
   hindi: {
     sawKill: (k, v, w, cam) => [`${cam ? "कैमरे पर" : "मैंने"} देखा ${k} ने ${v} को ${w} में मारा`, `${k} है, ${w} में ${v} को मारते देखा`],
@@ -97,6 +103,9 @@ const T = {
     hold: (x) => [`${x} पर अभी भी शक है`],
     skipYes: () => ["हाँ स्किप करो", "अभी स्किप"],
     skipNo: (x) => [`स्किप मत करो, ${x} को वोट करो`],
+    callerWhy: (c, tag) => [`${tag}मीटिंग क्यों बुलाई?`, `${tag}क्या हुआ? कुछ देखा?`],
+    calmNothing: () => ["अभी तक कोई नहीं मरा, कोई जानकारी नहीं", "मेरी तरफ सब ठीक है, स्किप?"],
+    calmWho: () => ["अभी कोई मरा ही नहीं", "अभी कुछ हुआ नहीं, स्किप"],
   },
 };
 
@@ -144,6 +153,27 @@ function respond(ctx, memory, ownSaid, trigger, used) {
     const w = companionAt(memory, act.where, act.t, aliveNames, me);
     return say(w && chance(0.6) ? L.alibiWith(act.where, act.act, w) : L.alibi(act.where, act.act));
   };
+
+  // [REALISM] Nobody has died yet: nothing to solve, nobody to blame.
+  // Saboteur bots blend in the same way.
+  if (ctx.noDeaths) {
+    const c = ctx.caller && ctx.caller !== ctx.me ? ctx.caller.name : null;
+    const tag = c ? (ctx.callerIsHuman ? `@${c} ` : `${c}, `) : "";
+    let line = "";
+    if (intent === "open") {
+      // Each bot was given a different angle (see meetingBrain CALM_ANGLE).
+      if (ctx.angle === "askCaller" && c) line = say(L.callerWhy(c, tag));
+      else if (ctx.angle === "whatIDid") line = act ? say(L.alibi(act.where, act.act)) : say(L.calmNothing());
+      else if (ctx.angle === "agreeSkip") line = say(L.skipYes().concat(L.calmNothing()));
+      else line = c && chance(0.6) ? say(L.callerWhy(c, tag)) : say(L.calmNothing());
+    }
+    else if (intent === "accuse" || intent === "where") line = alibi();
+    else if (intent === "skip") line = say(L.skipYes());
+    else if (intent === "who") line = say(L.calmWho());
+    else if (intent === "defend") line = say(L.calmNothing());
+    else line = !ownSaid.length && c && chance(0.5) ? say(L.callerWhy(c, tag)) : "";
+    return { say: line, vote: "skip" };
+  }
 
   if (ctx.isSab) {
     const crew = ctx.alive.filter(([, p]) => p !== ctx.me && p.role !== "saboteur").map(([, p]) => p.name);

@@ -179,8 +179,12 @@ function buildContext(room, botId, memory, now) {
   const chat = (meeting.messages || []).slice(-15).map((m) => `${m.senderName}${room.players[m.senderId] && room.players[m.senderId].isBot ? " (bot)" : ""}: ${m.text}`);
   const humanTexts = (meeting.messages || []).filter((m) => room.players[m.senderId] && !room.players[m.senderId].isBot).map((m) => m.text);
   const teammates = isSab ? alive.filter(([id, p]) => id !== botId && p.role === "saboteur").map(([, p]) => p.name) : [];
+  // [REALISM] A meeting with no deaths at all has nothing to solve: real
+  // players ask the caller why, say what they were doing, and skip.
+  const noDeaths = dead.length === 0;
+  const callerIsHuman = !!(caller && !caller.isBot);
   return {
-    me, isSab, alive, dead, caller, body, chat, humanTexts, teammates,
+    me, isSab, alive, dead, caller, body, chat, humanTexts, teammates, noDeaths, callerIsHuman,
     language: detectLanguage(humanTexts),
     memory: memoryLines(memory, now, isSab),
     reason: meeting.reason === "report" ? `${caller ? caller.name : "Someone"} reported ${body ? body.name + "'s" : "a"} dead body${body && typeof body.bodyX === "number" ? " in " + B.roomNameAt(body.bodyX, body.bodyY) : ""}` : `${caller ? caller.name : "Someone"} called an emergency meeting`,
@@ -207,21 +211,35 @@ function systemPrompt(ctx) {
       : "Reply in the same language and style the human players use in the chat (if nobody has written yet, use simple casual English).";
   const role = ctx.isSab
     ? `You are secretly the SABOTEUR${ctx.teammates.length ? ` (your fellow saboteur: ${ctx.teammates.join(", ")})` : ""}. Never admit it. Stay calm, give a believable alibi from what you "did", and if useful cast doubt on someone else - but don't overdo it, and never contradict facts everyone saw. Don't vote for your teammate.`
-    : "You are CREW. Tell the truth about what you remember. You may be unsure - say so. If you saw a kill, say it clearly. If you have nothing solid, ask questions or vote skip.";
+    : "You are CREW. Tell the truth about what you remember. You may be unsure - say so. If you saw a kill, say it clearly. Only call someone suspicious if you saw a kill, found a body right where they were, or they clearly lied in the chat. Otherwise ask questions or vote skip.";
   return [
     `You are "${ctx.me.name}", a player in NEAR Saboteur, a social deduction game: crew do missions on a space station, one or two hidden saboteurs kill people. Everyone is now in a meeting to discuss and vote someone out.`,
     "Your name is shown with a BOT tag, so everyone knows you are an AI bot. If asked, admit you're a bot - but you still play to win like anyone else.",
     role,
     `Personality: ${personaFor(ctx.me.name)}.`,
+    "HONESTY RULES (most important): only mention things that are in \"What you remember\" or in the chat. Never invent sightings, camera footage, movements, lies or events. If you don't know, say you don't know. Being in a room with others, walking around, being seen on cameras or doing missions is NORMAL - it is never evidence on its own.",
+    "Don't start long back-and-forth arguments with other bots; talk to the humans, and keep it short.",
     "Write like a real player in a fast game chat: ONE short message (max ~18 words), no lists, no narration, no quotes, react to what others just said, use player names. It's fine to stay silent if you have nothing useful.",
     "Never quote exact times or seconds from your memory (no \"44s\"); say it like a person would: \"just now\", \"a bit before\", \"earlier\" (or the same in the chat's language).",
     lang,
     'Answer ONLY with JSON: {"say": "<your chat message, or empty string to stay silent>", "vote": "<exact name of a living player, or skip>", "suspect": "<name or none>"}',
   ].join("\n");
 }
+// Quiet meetings: each bot takes a different angle so they don't all say
+// the same thing at once.
+const CALM_ANGLE = {
+  askCaller: "You speak first: ask the caller, in your own words, why they called it.",
+  whatIDid: "Say briefly what you were doing (from your memory) - nothing else.",
+  agreeSkip: "React to the chat: agree it's probably nothing and that skipping is fine.",
+  react: "Only react to what someone just said, briefly - or stay silent (empty say) if there's nothing to add.",
+};
 function userPrompt(ctx, alreadySaid, trigger, othersSaid) {
+  const situation = ctx.noDeaths
+    ? `SITUATION: nobody has died yet this game - no body, no kill, no evidence against anyone. ${ctx.caller ? ctx.caller.name : "Someone"} called this emergency meeting without a body. Talk like a real player would. ${CALM_ANGLE[ctx.angle] || CALM_ANGLE.react} Do NOT accuse anyone or call anyone sus, and vote skip unless a human gives a real reason. If someone already asked the caller why, don't ask again. Don't end your message with "vote skip" every time.`
+    : "";
   return [
     `Meeting: ${ctx.reason}.`,
+    situation,
     `Alive: ${ctx.alive.map(([, p]) => p.name + (p === ctx.me ? " (you)" : "")).join(", ")}.`,
     ctx.dead.length ? `Dead: ${ctx.dead.map(([, p]) => p.name).join(", ")}.` : "Nobody else is dead.",
     "",
@@ -310,6 +328,7 @@ function botState(st, id) {
 
 async function think(room, roomCode, botId, memory, bs, now, st, purpose) {
   const ctx = buildContext(room, botId, memory, now);
+  ctx.angle = bs.calmAngle || null;
   const mentioned = bs.mentioned;
   bs.mentioned = false;
   const trigger = bs.trigger || null;
@@ -337,14 +356,35 @@ async function think(room, roomCode, botId, memory, bs, now, st, purpose) {
   // Models sometimes prefix their own name ("Nova: ...") or wrap in quotes.
   const esc = ctx.me.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   say = say.replace(new RegExp(`^\\s*${esc}\\s*(\\(bot\\))?\\s*[:\\-]\\s*`, "i"), "").replace(/^["']+|["']+$/g, "").trim().slice(0, 200);
+  // [REALISM] Safety net: with nobody dead there is nothing to accuse
+  // anyone of - if the model still made something up, use a calm line.
+  if (ctx.noDeaths && say && ACCUSE_RX.test(say) && !/\bany ?sus\b|\bkoi sus\b/i.test(say) && !NEGATED_SUS_RX.test(say)) {
+    console.log(`[BOTS-AI] ${ctx.me.name}: dropped made-up accusation "${say}"`);
+    const calm = FC.respond(ctx, memory, bs.said, trigger, st ? st.used : new Set());
+    say = (calm.say || "").trim();
+  }
+  // People don't quote seconds ("30s ago") - the prompt says so, enforce it.
+  say = say.replace(/\b\d+\s?(s|sec|secs|seconds?)\s+ago\b/gi, ctx.language === "english" ? "a bit ago" : "thodi der pehle")
+    .replace(/\b\d+\s?(m|min|mins|minutes?)\s+ago\b/gi, ctx.language === "english" ? "earlier" : "pehle");
+  // [REALISM] "I'll stay silent" is not a chat message - just stay silent.
+  if (/\b(stay(ing)? (silent|quiet)|nothing to add|chup rahunga)\b/i.test(say)) say = "";
+  // Only one person needs to ask the caller why - don't echo it.
+  if (ctx.noDeaths && say && ASK_WHY_RX.test(say) && (ctx.chat || []).some((l) => ASK_WHY_RX.test(l))) {
+    const alt = FC.respond({ ...ctx, angle: chance(0.5) ? "whatIDid" : "agreeSkip" }, memory, bs.said, null, st ? st.used : new Set());
+    say = mentioned ? (alt.say || "").trim() : (chance(0.5) ? (alt.say || "").trim() : "");
+  }
   // Vote: map the name back to a living player id (or skip).
   let vote = "skip";
   if (typeof out.vote === "string" && out.vote.toLowerCase() !== "skip") {
     const hit = Object.entries(room.players).find(([id, p]) => p.alive !== false && id !== botId && p.name.toLowerCase() === out.vote.trim().toLowerCase());
     if (hit && !(ctx.isSab && hit[1].role === "saboteur")) vote = hit[0];
   }
+  if (ctx.noDeaths) vote = "skip"; // nobody died: nothing to vote anyone out for
   return { say, vote, source };
 }
+const ASK_WHY_RX = /(\bwhy\b|\bkyu|\bkyun|क्यों).*(\bcall|\bmeet|\bem\b|\bemergency|\bbula|मीटिंग)|(\bcall|\bmeet|\bem\b|\bemergency|\bbula).*(\bwhy\b|\bkyu)/i;
+const NEGATED_SUS_RX = /\b(no|not|nobody|no one|noone|nothing|koi nahi|kisi pe nahi)\b[^.?!]{0,14}\b(sus|suspect|suspicious|kill|kills|killed|shak)/i;
+const ACCUSE_RX = /\b(sus|suspect|suspicious|kill|killed|killer|killing|vanish(ed)?|lying|liar|lied|fake|faking|faked|impostor|saboteur|sabo|vote (?!skip)\w+)\b|shak|jhooth|jhoota|maara|संदिग्ध|झूठ/i;
 
 // Called every bot tick while room.meeting exists.
 function tick(roomCode, room, now, api) {
@@ -361,13 +401,23 @@ function tick(roomCode, room, now, api) {
         const mem = api.memoryOf(id);
         const hasNews = id === meeting.calledBy || mem.some((m) => m.kind === "kill" || m.kind === "body");
         bs.hasNews = hasNews;
+        const calm = !Object.values(room.players).some((p) => p.alive === false);
         // People with news speak first (they start "thinking" right away so
         // a slow AI reply still lands early); others chime in later or not at all.
         if ((room.botChatMode || "auto") === "mention") { bs.nextActAt = 0; bs.purpose = "chime"; } // @ only: wait to be tagged
         else if (hasNews) { bs.nextActAt = now; bs.notBefore = now + rand(3000, 7000); bs.purpose = "open"; }
+        else if (calm) {
+          // Nothing happened: one bot asks the caller, a couple of others add
+          // something different, the rest stay quiet unless asked.
+          const order = st.calmOrder = (st.calmOrder || 0) + 1;
+          bs.calmAngle = order === 1 ? "askCaller" : order === 2 ? pick(["whatIDid", "agreeSkip"]) : (chance(0.4) ? pick(["whatIDid", "agreeSkip", "react"]) : null);
+          bs.nextActAt = bs.calmAngle ? now + (order === 1 ? rand(4000, 8000) : rand(14000, 35000)) : 0;
+          bs.purpose = "chime";
+        }
         else { bs.nextActAt = now + (chance(0.75) ? rand(9000, 30000) : rand(40000, 70000)); bs.purpose = "chime"; }
       }
     }
+    const calmMeeting = !Object.values(room.players).some((p) => p.alive === false);
     for (const id of botIds) {
       const bs = botState(st, id);
       // Deliver a message whose "typing" time is over.
@@ -391,7 +441,7 @@ function tick(roomCode, room, now, api) {
       if (bs.busy || bs.pendingSay || !bs.nextActAt || now < bs.nextActAt) continue;
       // @ only mode (or the voting window): only answer when tagged.
       if ((mentionOnly || meeting.stage === "voting") && bs.purpose !== "reply") { bs.nextActAt = 0; continue; }
-      if (bs.said.length >= MAX_MSGS_PER_BOT || (bs.said.length >= 2 && bs.purpose !== "reply")) { bs.nextActAt = 0; continue; }
+      if (bs.said.length >= MAX_MSGS_PER_BOT || (bs.said.length >= (calmMeeting ? 1 : 2) && bs.purpose !== "reply")) { bs.nextActAt = 0; continue; }
       bs.busy = true;
       bs.nextActAt = 0;
       const purpose = bs.purpose || "chime";
@@ -465,14 +515,19 @@ function onChat(roomCode, room, message) {
   const isQuestion = /\?|\bkya\b|\bkaun\b|\bkon\b|\bwhere\b|\bwho\b|\bkahan\b|\bkidhar\b|कौन|कहाँ|क्या/.test(text);
   const now = Date.now();
   const mentionOnly = (room.botChatMode || "auto") === "mention";
+  const calm = !Object.values(room.players).some((p) => p.alive === false);
   for (const [id, p] of Object.entries(room.players)) {
     if (!p.isBot || p.alive === false || id === message.senderId) continue;
     const bs = botState(st, id);
     if (bs.said.length >= MAX_MSGS_PER_BOT || bs.busy || bs.pendingSay) continue;
+    // [REALISM] Bot-to-bot: no reply chains in a quiet meeting, and at most
+    // one answer to another bot otherwise.
+    if (fromBot && (calm || bs.answeredBot)) continue;
     const tagged = new RegExp(`@${p.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(message.text || "");
     const named = tagged || (!mentionOnly && text.includes(p.name.toLowerCase()));
     if (mentionOnly && !tagged) continue;
     if (named) {
+      if (fromBot) { if (!chance(0.6)) continue; bs.answeredBot = true; }
       bs.mentioned = true;
       bs.purpose = "reply";
       bs.trigger = { text: message.text || "", fromName: message.senderName };
