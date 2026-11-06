@@ -318,7 +318,11 @@ playerSchema.index(
 // very first one could ever save).
 playerSchema.index(
   { walletAddress: 1 },
-  { unique: true, partialFilterExpression: { walletAddress: { $type: "string", $ne: "" } }, name: "walletAddress_partial_unique" }
+  // [BUG FIX] Was `$ne: ""`, which MongoDB does not allow in a partial
+  // index ("Expression not supported in partial index: $not"), so this
+  // index was never actually created. `$gt: ""` means the same thing
+  // here (any non-empty string) and is supported.
+  { unique: true, partialFilterExpression: { walletAddress: { $type: "string", $gt: "" } }, name: "walletAddress_partial_unique" }
 );
 
 const Player = mongoose.model("Player", playerSchema);
