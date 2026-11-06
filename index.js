@@ -8119,6 +8119,205 @@ function startMeeting(roomCode, callerId, reason, reportedBodyId) {
   return null;
 }
 
+// [AI BOTS] Extracted from sendChatMessage so bots post meeting chat
+// under the same rules (alive, 200 chars). Returns the stored message, or
+// { message } (an error object without senderId) on failure.
+function postMeetingChat(roomCode, senderId, text, replyTo, gifUrl) {
+  const room = rooms[roomCode];
+  if (!room || !room.meeting) return { message: "No meeting in progress." };
+
+  const sender = room.players[senderId];
+  if (!sender) return { message: "Not in this room." };
+
+  // [GHOST RULE] - dead players (ghosts) can't send chat messages, only
+  // read them (which they already get, since chatMessageReceived is
+  // broadcast to the whole room via io.to(roomCode)).
+  if (!sender.alive) {
+    return { message: "You are a ghost and cannot send chat messages." };
+  }
+
+  const trimmed = (text || "").trim().slice(0, 200); // 200 char limit, spam-protection
+  // [NEW FEATURE - GIF PICKER] validateGifUrl (defined once, shared by
+  // all three chat handlers) rejects anything that isn't a plausible
+  // https image/gif URL - a message with an invalid/missing gifUrl
+  // just silently drops the GIF and falls back to text-only, exactly
+  // like a normal text message would.
+  // [NEW FEATURE - PLAY PASS] GIFs are a Play Pass perk - strip any
+  // gifUrl server-side if the sender doesn't actually have Play Pass,
+  // regardless of what the client sent (the UI already locks this, but
+  // never trust the client alone for a gated feature).
+  const safeGifUrl = sender.hasPlayPass ? validateGifUrl(gifUrl) : null;
+  if (!trimmed && !safeGifUrl) return { message: "Empty message." };
+
+  const message = {
+    senderId: senderId,
+    senderName: sender.name,
+    senderAvatar: sender.avatarId,
+    // [NEW FEATURE - PLAY PASS] Frozen at send time, same reasoning as
+    // senderHasLegionBadge right below.
+    senderAvatarVariant: sender.avatarVariantId || null,
+    senderHasPlayPass: !!sender.hasPlayPass,
+    // [NEW FEATURE - NEAR LEGION BADGE] Frozen at send time, same as
+    // senderName/senderAvatar - keeps working even if the sender later
+    // leaves the room, unlike a live lookup would.
+    senderHasLegionBadge: !!sender.hasLegionBadge,
+    text: trimmed,
+    gifUrl: safeGifUrl,
+    timestamp: Date.now(),
+    // [NEW FEATURE] WhatsApp/Telegram-style reply — only the small bits
+    // needed to render a reply preview are kept, never the client's
+    // full message object, to avoid trusting/forwarding anything
+    // unexpected.
+    replyTo: (replyTo && replyTo.senderName && replyTo.text)
+      ? { senderName: String(replyTo.senderName).slice(0, 40), text: String(replyTo.text).slice(0, 200) }
+      : null,
+  };
+
+  room.meeting.messages.push(message);
+  bots.onMeetingChat(roomCode, message); // [AI BOTS] let bots react
+
+  io.to(roomCode).emit("chatMessageReceived", message);
+  return message;
+}
+
+// [AI BOTS] Extracted from voteSkipDiscussion (same 60% rule for bots).
+function voteSkipDiscussion(roomCode, voterId) {
+  const room = rooms[roomCode];
+  if (!room || !room.meeting || room.meeting.stage !== "chat") return;
+
+  const voter = room.players[voterId];
+  if (!voter || !voter.alive) return;
+
+  room.meeting.skipDiscussionVotes[voterId] = true;
+
+  const totalAlive = getActiveAliveCount(room);
+  const totalSkipVotes = Object.keys(room.meeting.skipDiscussionVotes).length;
+
+  io.to(roomCode).emit("skipDiscussionUpdate", { totalSkipVotes, totalAlive });
+  console.log(`Skip vote in room ${roomCode}: ${totalSkipVotes}/${totalAlive}`);
+
+  // Using a tiny epsilon (0.0001) to guard against floating-point
+  // rounding making an exact 60% (e.g. 3/5) compute as 0.5999999999
+  // instead of exactly 0.6 and missing the threshold by a hair.
+  if (totalAlive > 0 && totalSkipVotes / totalAlive >= 0.6 - 0.0001) {
+    // [NEW FEATURE] Tell everyone the skip threshold was reached RIGHT
+    // AWAY (so clients can show a "Discussion skipped" loading
+    // transition), but wait 1.5s before actually flipping the stage
+    // to voting - this is what gives that transition message enough
+    // time to actually be seen, instead of the chat screen vanishing
+    // and the voting screen appearing in the same instant.
+    io.to(roomCode).emit("discussionSkipped");
+    setTimeout(() => {
+      // [BUG-PROOFING] Re-fetch the room fresh from the rooms object
+      // (not the closed-over `room` variable) in case the room was
+      // somehow recreated in this 1.5s window, and re-check the
+      // meeting is still in the chat stage before forcing the
+      // transition.
+      const freshRoom = rooms[roomCode];
+      if (freshRoom && freshRoom.meeting && freshRoom.meeting.stage === "chat") {
+        const meetingRef = freshRoom.meeting;
+        meetingRef.stage = "voting";
+        meetingRef.startedAt = Date.now();
+        io.to(roomCode).emit("meetingStageChanged", { stage: "voting" });
+        console.log(`Discussion skipped by vote in room ${roomCode}`);
+        // [BUG FIX] Same server-driven finalize guarantee as the
+        // natural (non-skipped) chat->voting path above.
+        setTimeout(() => {
+          if (rooms[roomCode]?.meeting !== meetingRef) return;
+          if (meetingRef.stage !== "voting") return;
+          finalizeVoting(roomCode);
+        }, VOTING_DURATION_MS);
+      }
+    }, 1500);
+  }
+}
+
+// [AI BOTS] Extracted from castVote so bots vote under the same rules.
+// Returns null on success or { message } on error.
+function castMeetingVote(roomCode, voterId, targetId) {
+  const room = rooms[roomCode];
+  if (!room || !room.meeting) return;
+
+  const voter = room.players[voterId];
+  if (!voter || !voter.alive) {
+    return { message: "You cannot vote." };
+  }
+  // [NEW FEATURE] A player can only vote once - silently ignore a
+  // repeat castVote from someone who already has a stored vote this
+  // meeting (the client itself already disables its own vote buttons
+  // after voting, but the server re-checks this independently rather
+  // than trusting that).
+  // [BUG FIX] Now actually tells the client when this happens (instead
+  // of a bare silent return) - if a rare client-side edge case ever
+  // let a duplicate attempt through, the client gets explicit
+  // feedback instead of being left with no signal that its second
+  // attempt was rejected.
+  if (room.meeting.votes[voterId]) {
+    return { message: "You've already voted." };
+  }
+
+  // Store the vote (a null targetId means a skip-vote)
+  const choice = targetId || "skip";
+  // [BUG FIX] Validate the target actually refers to a real, currently
+  // alive player in the room - a stale/invalid id (e.g. a vote cast
+  // against a card built just before that player's id changed from a
+  // reconnect) would otherwise silently get stored as-is, diluting the
+  // real tally into a phantom bucket that matches nobody. That could
+  // plausibly shift which real candidate ends up with the most votes -
+  // reject it outright instead, with explicit feedback.
+  if (choice !== "skip" && (!room.players[choice] || !room.players[choice].alive)) {
+    return { message: "That target is no longer valid." };
+  }
+  room.meeting.votes[voterId] = choice;
+
+  const totalAlive = getActiveAliveCount(room);
+  const totalVotes = Object.keys(room.meeting.votes).length;
+
+  // [NEW FEATURE] Broadcast WHO voted for WHOM, live, the moment each
+  // vote is cast - this is what lets every player's screen show a
+  // small avatar of the voter next to whichever target (or "skip")
+  // they picked, in real time, rather than the vote breakdown only
+  // ever being revealed after the fact on the results screen. This is
+  // a deliberate, explicit design change from the original
+  // "vote counts only, no who-voted-for-whom until results" behavior -
+  // requested specifically to match Among Us's own live voting screen,
+  // which DOES show each vote landing on its target's portrait in
+  // real time.
+  io.to(roomCode).emit("voteUpdate", { totalVotes, totalAlive, voterId: voterId, choice });
+
+  console.log(`${voter.name} voted in room ${roomCode} (${totalVotes}/${totalAlive})`);
+
+  // [UPDATE] Once every currently-active alive player has voted, give
+  // it a short 3s buffer (matching the same "let the moment land"
+  // pattern used for the discussion-skip transition above) and then
+  // finalize automatically, instead of always waiting out the full
+  // 30s voting timer even when there's nobody left to vote. Re-checks
+  // meeting.stage and the vote count fresh inside the timeout (not the
+  // closed-over totalVotes) so a late reconnect/disconnect in that 3s
+  // window, or the regular timer already having resolved it, can't
+  // cause a double-resolution.
+  if (totalAlive > 0 && totalVotes >= totalAlive) {
+    // [BUG-PROOFING] Compares the MEETING OBJECT ITSELF (not some
+    // token field - room.meeting has none) to detect whether this is
+    // still the same meeting 3s later, matching the same reference-
+    // identity pattern used for the alarm/chat/voting stage timers
+    // elsewhere in this handler.
+    const meetingAtVoteComplete = room.meeting;
+    setTimeout(() => {
+      const stillRoom = rooms[roomCode];
+      if (!stillRoom || !stillRoom.meeting) return;
+      if (stillRoom.meeting !== meetingAtVoteComplete) return; // a new meeting started
+      if (stillRoom.meeting.stage !== "voting") return; // already resolved/moved on
+      const stillTotalAlive = getActiveAliveCount(stillRoom);
+      const stillTotalVotes = Object.keys(stillRoom.meeting.votes).length;
+      if (stillTotalAlive > 0 && stillTotalVotes >= stillTotalAlive) {
+        finalizeVoting(roomCode);
+      }
+    }, 3000);
+  }
+  return null;
+}
+
 // [AI BOTS] A crew bot finished one of its missions - same bookkeeping a
 // human's reportMissionProgress ends up doing (progress bar + win check).
 function completeBotMission(roomCode, botId) {
@@ -8138,6 +8337,9 @@ bots.setHooks({
   performSabotage,
   startMeeting,
   completeMission: completeBotMission,
+  postMeetingChat,
+  castMeetingVote,
+  voteSkipDiscussion,
   killRangePx: SERVER_KILL_RANGE_PX,
 });
 
@@ -10967,55 +11169,7 @@ io.on("connection", (socket) => {
   // uses getActiveAliveCount (excludes anyone currently in a disconnect
   // grace period) - see that function's comment for why.
   socket.on("voteSkipDiscussion", () => {
-    const roomCode = socket.data.roomCode;
-    const room = rooms[roomCode];
-    if (!room || !room.meeting || room.meeting.stage !== "chat") return;
-
-    const voter = room.players[socket.id];
-    if (!voter || !voter.alive) return;
-
-    room.meeting.skipDiscussionVotes[socket.id] = true;
-
-    const totalAlive = getActiveAliveCount(room);
-    const totalSkipVotes = Object.keys(room.meeting.skipDiscussionVotes).length;
-
-    io.to(roomCode).emit("skipDiscussionUpdate", { totalSkipVotes, totalAlive });
-    console.log(`Skip vote in room ${roomCode}: ${totalSkipVotes}/${totalAlive}`);
-
-    // Using a tiny epsilon (0.0001) to guard against floating-point
-    // rounding making an exact 60% (e.g. 3/5) compute as 0.5999999999
-    // instead of exactly 0.6 and missing the threshold by a hair.
-    if (totalAlive > 0 && totalSkipVotes / totalAlive >= 0.6 - 0.0001) {
-      // [NEW FEATURE] Tell everyone the skip threshold was reached RIGHT
-      // AWAY (so clients can show a "Discussion skipped" loading
-      // transition), but wait 1.5s before actually flipping the stage
-      // to voting - this is what gives that transition message enough
-      // time to actually be seen, instead of the chat screen vanishing
-      // and the voting screen appearing in the same instant.
-      io.to(roomCode).emit("discussionSkipped");
-      setTimeout(() => {
-        // [BUG-PROOFING] Re-fetch the room fresh from the rooms object
-        // (not the closed-over `room` variable) in case the room was
-        // somehow recreated in this 1.5s window, and re-check the
-        // meeting is still in the chat stage before forcing the
-        // transition.
-        const freshRoom = rooms[roomCode];
-        if (freshRoom && freshRoom.meeting && freshRoom.meeting.stage === "chat") {
-          const meetingRef = freshRoom.meeting;
-          meetingRef.stage = "voting";
-          meetingRef.startedAt = Date.now();
-          io.to(roomCode).emit("meetingStageChanged", { stage: "voting" });
-          console.log(`Discussion skipped by vote in room ${roomCode}`);
-          // [BUG FIX] Same server-driven finalize guarantee as the
-          // natural (non-skipped) chat->voting path above.
-          setTimeout(() => {
-            if (rooms[roomCode]?.meeting !== meetingRef) return;
-            if (meetingRef.stage !== "voting") return;
-            finalizeVoting(roomCode);
-          }, VOTING_DURATION_MS);
-        }
-      }, 1500);
-    }
+    voteSkipDiscussion(socket.data.roomCode, socket.id);
   });
 
   // ---- MEETING CHAT MESSAGE ----
@@ -11023,61 +11177,8 @@ io.on("connection", (socket) => {
   // [MULTIPLAYER: SHARED] - every player's chat history should show the
   // same messages, so the server is the single source of truth here.
   socket.on("sendChatMessage", ({ text, replyTo, gifUrl }) => {
-    const roomCode = socket.data.roomCode;
-    const room = rooms[roomCode];
-    if (!room || !room.meeting) return;
-
-    const sender = room.players[socket.id];
-    if (!sender) return;
-
-    // [GHOST RULE] - dead players (ghosts) can't send chat messages, only
-    // read them (which they already get, since chatMessageReceived is
-    // broadcast to the whole room via io.to(roomCode)).
-    if (!sender.alive) {
-      socket.emit("chatError", { message: "You are a ghost and cannot send chat messages." });
-      return;
-    }
-
-    const trimmed = (text || "").trim().slice(0, 200); // 200 char limit, spam-protection
-    // [NEW FEATURE - GIF PICKER] validateGifUrl (defined once, shared by
-    // all three chat handlers) rejects anything that isn't a plausible
-    // https image/gif URL - a message with an invalid/missing gifUrl
-    // just silently drops the GIF and falls back to text-only, exactly
-    // like a normal text message would.
-    // [NEW FEATURE - PLAY PASS] GIFs are a Play Pass perk - strip any
-    // gifUrl server-side if the sender doesn't actually have Play Pass,
-    // regardless of what the client sent (the UI already locks this, but
-    // never trust the client alone for a gated feature).
-    const safeGifUrl = sender.hasPlayPass ? validateGifUrl(gifUrl) : null;
-    if (!trimmed && !safeGifUrl) return;
-
-    const message = {
-      senderId: socket.id,
-      senderName: sender.name,
-      senderAvatar: sender.avatarId,
-      // [NEW FEATURE - PLAY PASS] Frozen at send time, same reasoning as
-      // senderHasLegionBadge right below.
-      senderAvatarVariant: sender.avatarVariantId || null,
-      senderHasPlayPass: !!sender.hasPlayPass,
-      // [NEW FEATURE - NEAR LEGION BADGE] Frozen at send time, same as
-      // senderName/senderAvatar - keeps working even if the sender later
-      // leaves the room, unlike a live lookup would.
-      senderHasLegionBadge: !!sender.hasLegionBadge,
-      text: trimmed,
-      gifUrl: safeGifUrl,
-      timestamp: Date.now(),
-      // [NEW FEATURE] WhatsApp/Telegram-style reply — only the small bits
-      // needed to render a reply preview are kept, never the client's
-      // full message object, to avoid trusting/forwarding anything
-      // unexpected.
-      replyTo: (replyTo && replyTo.senderName && replyTo.text)
-        ? { senderName: String(replyTo.senderName).slice(0, 40), text: String(replyTo.text).slice(0, 200) }
-        : null,
-    };
-
-    room.meeting.messages.push(message);
-
-    io.to(roomCode).emit("chatMessageReceived", message);
+    const res = postMeetingChat(socket.data.roomCode, socket.id, text, replyTo, gifUrl);
+    if (res && !res.senderId && res.message === "You are a ghost and cannot send chat messages.") socket.emit("chatError", res);
   });
 
   // ---- GHOST CHAT (dead players only, anytime during the game) ----
@@ -11198,90 +11299,8 @@ io.on("connection", (socket) => {
   // [MULTIPLAYER: SHARED] - the server is what keeps the vote count and
   // decides the result, so no client can fake an outcome.
   socket.on("castVote", ({ targetId }) => {
-    const roomCode = socket.data.roomCode;
-    const room = rooms[roomCode];
-    if (!room || !room.meeting) return;
-
-    const voter = room.players[socket.id];
-    if (!voter || !voter.alive) {
-      socket.emit("voteError", { message: "You cannot vote." });
-      return;
-    }
-    // [NEW FEATURE] A player can only vote once - silently ignore a
-    // repeat castVote from someone who already has a stored vote this
-    // meeting (the client itself already disables its own vote buttons
-    // after voting, but the server re-checks this independently rather
-    // than trusting that).
-    // [BUG FIX] Now actually tells the client when this happens (instead
-    // of a bare silent return) - if a rare client-side edge case ever
-    // let a duplicate attempt through, the client gets explicit
-    // feedback instead of being left with no signal that its second
-    // attempt was rejected.
-    if (room.meeting.votes[socket.id]) {
-      socket.emit("voteError", { message: "You've already voted." });
-      return;
-    }
-
-    // Store the vote (a null targetId means a skip-vote)
-    const choice = targetId || "skip";
-    // [BUG FIX] Validate the target actually refers to a real, currently
-    // alive player in the room - a stale/invalid id (e.g. a vote cast
-    // against a card built just before that player's id changed from a
-    // reconnect) would otherwise silently get stored as-is, diluting the
-    // real tally into a phantom bucket that matches nobody. That could
-    // plausibly shift which real candidate ends up with the most votes -
-    // reject it outright instead, with explicit feedback.
-    if (choice !== "skip" && (!room.players[choice] || !room.players[choice].alive)) {
-      socket.emit("voteError", { message: "That target is no longer valid." });
-      return;
-    }
-    room.meeting.votes[socket.id] = choice;
-
-    const totalAlive = getActiveAliveCount(room);
-    const totalVotes = Object.keys(room.meeting.votes).length;
-
-    // [NEW FEATURE] Broadcast WHO voted for WHOM, live, the moment each
-    // vote is cast - this is what lets every player's screen show a
-    // small avatar of the voter next to whichever target (or "skip")
-    // they picked, in real time, rather than the vote breakdown only
-    // ever being revealed after the fact on the results screen. This is
-    // a deliberate, explicit design change from the original
-    // "vote counts only, no who-voted-for-whom until results" behavior -
-    // requested specifically to match Among Us's own live voting screen,
-    // which DOES show each vote landing on its target's portrait in
-    // real time.
-    io.to(roomCode).emit("voteUpdate", { totalVotes, totalAlive, voterId: socket.id, choice });
-
-    console.log(`${voter.name} voted in room ${roomCode} (${totalVotes}/${totalAlive})`);
-
-    // [UPDATE] Once every currently-active alive player has voted, give
-    // it a short 3s buffer (matching the same "let the moment land"
-    // pattern used for the discussion-skip transition above) and then
-    // finalize automatically, instead of always waiting out the full
-    // 30s voting timer even when there's nobody left to vote. Re-checks
-    // meeting.stage and the vote count fresh inside the timeout (not the
-    // closed-over totalVotes) so a late reconnect/disconnect in that 3s
-    // window, or the regular timer already having resolved it, can't
-    // cause a double-resolution.
-    if (totalAlive > 0 && totalVotes >= totalAlive) {
-      // [BUG-PROOFING] Compares the MEETING OBJECT ITSELF (not some
-      // token field - room.meeting has none) to detect whether this is
-      // still the same meeting 3s later, matching the same reference-
-      // identity pattern used for the alarm/chat/voting stage timers
-      // elsewhere in this handler.
-      const meetingAtVoteComplete = room.meeting;
-      setTimeout(() => {
-        const stillRoom = rooms[roomCode];
-        if (!stillRoom || !stillRoom.meeting) return;
-        if (stillRoom.meeting !== meetingAtVoteComplete) return; // a new meeting started
-        if (stillRoom.meeting.stage !== "voting") return; // already resolved/moved on
-        const stillTotalAlive = getActiveAliveCount(stillRoom);
-        const stillTotalVotes = Object.keys(stillRoom.meeting.votes).length;
-        if (stillTotalAlive > 0 && stillTotalVotes >= stillTotalAlive) {
-          finalizeVoting(roomCode);
-        }
-      }, 3000);
-    }
+    const err = castMeetingVote(socket.data.roomCode, socket.id, targetId);
+    if (err) socket.emit("voteError", err);
   });
 
   // ---- END MEETING MANUALLY (host, or any client triggering the timeout) ----

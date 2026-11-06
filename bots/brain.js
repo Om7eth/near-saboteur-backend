@@ -52,7 +52,8 @@ for (const [roomId, [podKey, rangeKey]] of Object.entries(STATION_KEYS)) {
 // draw from (MISSION_DEFS minus the compulsory wallet-balance mission,
 // which needs a real in-game wallet).
 const MISSION_ROOMS = M.MISSION_DEFS.map((m) => m.room).filter((r) => r !== "wallet_balance" && STATION_SPOTS[r]);
-const MISSION_LABEL = Object.fromEntries(M.MISSION_DEFS.map((m) => [m.room, m.label]));
+// Labels without their leading emoji, so bots talk like players ("Stake NEAR").
+const MISSION_LABEL = Object.fromEntries(M.MISSION_DEFS.map((m) => [m.room, m.label.replace(/^[^\p{L}\p{N}]+/u, "").trim()]));
 const ROOM_NAME = { cafeteria: "Assembly Hall", medbay: "Verification Center", security: "Security", reactor: "Confidential Vault", upper_eng: "Staking Vault", lower_eng: "Claim Vault", storage: "Near AI", comms: "Near Merch Store", o2: "Ironclaw Hub", admin: "Legion Hub", shields: "Exchange Hub", weapons: "Meme Market", navigation: "Cyber Defense Center", electrical: "Electrical" };
 const roomNameAt = (x, y) => { const r = P.roomAtPixel(x, y); return r ? (ROOM_NAME[r.id] || r.name) : "a corridor"; };
 

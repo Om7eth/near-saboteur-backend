@@ -22,6 +22,7 @@ const crypto = require("crypto");
 const M = require("./mapData");
 const P = require("./pathfinding");
 const B = require("./brain");
+const MB = require("./meetingBrain");
 
 const BOT_ID_PREFIX = "bot_";
 // Short fingerprint of the map the server is using (same FNV-1a hash the
@@ -651,7 +652,18 @@ function tick() {
 
     if (room.meeting) {
       rs.meetingSeen = true;
-      continue; // everyone is frozen during a meeting
+      // Everyone is frozen during a meeting - bots talk and vote instead.
+      try {
+        MB.tick(roomCode, room, now, {
+          memoryOf,
+          postMeetingChat: (...a) => hooks.postMeetingChat ? hooks.postMeetingChat(...a) : null,
+          castMeetingVote: (...a) => hooks.castMeetingVote ? hooks.castMeetingVote(...a) : null,
+          voteSkipDiscussion: (...a) => hooks.voteSkipDiscussion ? hooks.voteSkipDiscussion(...a) : null,
+        });
+      } catch (e) {
+        console.error(`[BOTS] meeting tick error in room ${roomCode}:`, e.message);
+      }
+      continue;
     }
     if (rs.meetingSeen) {
       // Meeting just ended - wait for the same 4s the clients wait, then
@@ -722,6 +734,10 @@ function onKill(roomCode, killerId, victimId) {
     B.witnessKill(room, id, p, brain, killer, victimId, killerId);
   }
 }
+function onMeetingChat(roomCode, message) {
+  const room = ctx && ctx.rooms[roomCode];
+  if (room) { try { MB.onChat(roomCode, room, message); } catch (e) { console.error("[BOTS] onChat error:", e.message); } }
+}
 function memoryOf(botId) {
   const b = brains.get(botId);
   return b && b.memory ? b.memory.slice() : [];
@@ -731,6 +747,7 @@ let tickTimer = null;
 function init({ io, rooms }) {
   ctx = { io, rooms };
   console.log(`[BOTS] map version ${MAP_VERSION}`);
+  console.log(`[BOTS] meeting chat: ${MB.aiStatus()}`);
   if (!tickTimer) tickTimer = setInterval(tick, TICK_MS);
 }
 
@@ -739,6 +756,7 @@ module.exports = {
   init,
   setHooks,
   onKill,
+  onMeetingChat,
   memoryOf,
   isBotId,
   isBot,
