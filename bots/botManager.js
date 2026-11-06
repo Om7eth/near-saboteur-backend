@@ -40,6 +40,7 @@ const MAX_PLAYERS = 10;
 // considerHunt / stepHunt below).
 const BOTS_CAN_BE_SABOTEUR = true;
 const PERCEIVE_MS = 400;
+const KILL_PAUSE_MS = 2500; // matches KILL_CUTSCENE_MS in game.jsx
 // Clients teleport everyone back to their spawn point 4s after a vote
 // result (see votingResult in game.jsx). Bots copy that.
 const POST_MEETING_RESPAWN_MS = 4000;
@@ -408,20 +409,35 @@ function isFellowSaboteur(room, oid) {
   // is information a human Saboteur has too.
   return room.players[oid] && room.players[oid].role === "saboteur";
 }
+// Who (of the crew this bot can see) could see a kill on `target`? Uses
+// each crew member's OWN vision - so with the lights cut (crew vision 5
+// tiles instead of 9) fewer people count as witnesses. Only players the
+// bot can actually see are considered (no wallhacks).
+function witnessesOf(room, seen, targetId) {
+  const t = room.players[targetId];
+  return seen.filter((oid) => oid !== targetId && !isFellowSaboteur(room, oid) && B.canSee(room, room.players[oid], t)).length;
+}
+const isDesperate = (room, brain, now) => !room.saboteurTeamHasKilled && now - (brain.gameStartedAt || now) > 4.5 * 60 * 1000;
+
 function considerHunt(roomCode, room, id, p, brain, seen, now) {
   if (brain.mode === "hunt" || brain.mode === "flee" || room.meeting) return;
-  if (now < Math.max(p.killCooldownUntil || 0, brain.killPatienceUntil || 0)) return;
+  if (now < Math.max(p.killCooldownUntil || 0, brain.killPatienceUntil || 0)) { brain.opportunitySince = 0; return; }
   const crewSeen = seen.filter((oid) => !isFellowSaboteur(room, oid));
-  if (!crewSeen.length) return;
-  // Getting desperate near the 7-minute no-kill deadline: accept one witness.
-  const desperate = !room.saboteurTeamHasKilled && now - (brain.gameStartedAt || now) > 4.5 * 60 * 1000;
-  const allowed = desperate ? 1 : 0;
-  const target = crewSeen
-    .map((oid) => ({ oid, d: Math.hypot(room.players[oid].x - p.x, room.players[oid].y - p.y) }))
-    .sort((a, b) => a.d - b.d)[0];
-  if (crewSeen.length - 1 > allowed) return;
+  if (!crewSeen.length) { brain.opportunitySince = 0; return; }
+  const allowed = isDesperate(room, brain, now) ? 1 : 0; // near the 7-minute deadline: accept one witness
+  const options = crewSeen
+    .map((oid) => ({ oid, d: Math.hypot(room.players[oid].x - p.x, room.players[oid].y - p.y), w: witnessesOf(room, crewSeen, oid) }))
+    .filter((o) => o.w <= allowed)
+    .sort((a, b) => a.d - b.d);
+  if (!options.length) { brain.opportunitySince = 0; return; }
+  // Medium skill: a human takes a moment to notice the chance, and
+  // sometimes gets cold feet.
+  if (!brain.opportunitySince) { brain.opportunitySince = now; brain.reactAfter = rand(600, 1500); return; }
+  if (now - brain.opportunitySince < brain.reactAfter) return;
+  brain.opportunitySince = 0;
+  if (B.chance(0.12)) { brain.killPatienceUntil = now + rand(5000, 10000); return; }
   brain.mode = "hunt";
-  brain.target = target.oid;
+  brain.target = options[0].oid;
   brain.huntSince = now;
   brain.path = null;
   brain.waitUntil = 0;
@@ -433,23 +449,25 @@ function stepHunt(roomCode, room, id, p, brain, seen, now) {
   const visible = seen.includes(brain.target);
   if (visible) brain.targetLastSeen = now;
   if (now - (brain.targetLastSeen || brain.huntSince) > 2500) return give(rand(6000, 14000)); // lost them
-  const desperate = !room.saboteurTeamHasKilled && now - (brain.gameStartedAt || now) > 4.5 * 60 * 1000;
-  const witnesses = seen.filter((oid) => oid !== brain.target && !isFellowSaboteur(room, oid)).length;
-  if (witnesses > (desperate ? 1 : 0)) return give(rand(8000, 16000)); // someone else showed up
-  if (now - brain.huntSince > 25000) return give(rand(10000, 20000)); // don't chase forever
+  const witnesses = witnessesOf(room, seen, brain.target);
+  if (witnesses > (isDesperate(room, brain, now) ? 1 : 0)) return give(rand(8000, 16000)); // someone else could see
+  if (now - brain.huntSince > 15000) return give(rand(10000, 20000)); // don't chase forever
   const d = Math.hypot(t.x - p.x, t.y - p.y);
   if (d <= hooks.killRangePx * 0.7 && visible) {
     const err = hooks.performKill ? hooks.performKill(roomCode, id, brain.target) : { message: "no hook" };
     if (!err) {
       B.remember(brain, { kind: "i-killed", who: brain.target, name: t.name, where: B.roomNameAt(t.x, t.y) });
+      brain.lastActionAt = now;
       brain.reported.add(brain.target); // never "find" your own kill by accident
       brain.mode = "flee";
       brain.target = null;
       brain.killPatienceUntil = now + rand(25000, 50000);
       brain.path = null;
-      // Walk away to somewhere else, like nothing happened.
+      // Stay at the kill spot for the same ~2.5s a human killer is frozen
+      // by their kill cutscene, then walk away like nothing happened.
+      brain.waitUntil = now + KILL_PAUSE_MS + rand(0, 500);
       chooseDestination(room, p, brain);
-      startLeg(brain, now);
+      startLeg(brain, brain.waitUntil);
       brain.legSpeed = rand(0.95, 1.0);
       return;
     }
@@ -464,13 +482,39 @@ function stepHunt(roomCode, room, id, p, brain, seen, now) {
     brain.legSpeed = rand(0.93, 1.0);
   }
 }
+// Sabotage like a decent (not perfect) human Saboteur: only with a reason,
+// and not too often.
+//  - Lights: kill is ready but the crew in view are grouped up (too many
+//    witnesses) -> cut the lights so they see less.
+//  - Gates: chasing a target inside a room -> lock that side's gates so
+//    nobody else walks in.
+//  - Split: nothing happening for a long while -> lock one side to break
+//    groups up.
 function maybeSabotage(roomCode, room, id, p, brain, seen, now) {
-  if (now < (brain.nextSabotageAt || 0) || room.meeting || !hooks.performSabotage) return;
-  brain.nextSabotageAt = now + rand(45000, 90000);
-  const lightsOn = !room.activeSabotageType;
-  const type = lightsOn && B.chance(0.4) ? "electricity" : (B.chance(0.5) ? "gateLeft" : "gateRight");
+  if (room.meeting || !hooks.performSabotage) return;
+  if (now < (brain.nextSabotageAt || 0)) return;
+  if (now < (p.postKillSabotageLockUntil || 0) || now < (p.sabotageCooldownUntil || 0)) return;
+  const killReady = now >= (p.killCooldownUntil || 0);
+  const crewSeen = seen.filter((oid) => !isFellowSaboteur(room, oid));
+  let type = null, why = "";
+  if (killReady && !room.activeSabotageType && crewSeen.length >= 2 && crewSeen.every((oid) => witnessesOf(room, crewSeen, oid) > 0)) {
+    type = "electricity"; why = "crew grouped up";
+  } else if (brain.mode === "hunt" && !room.activeGateLock && brain.target) {
+    const t = room.players[brain.target];
+    if (t && P.roomAtPixel(t.x, t.y) && Math.hypot(t.x - p.x, t.y - p.y) < 6 * M.TILE && B.chance(0.35)) {
+      type = t.x / M.TILE < 70 ? "gateLeft" : "gateRight"; why = "trap target";
+    }
+  } else if (!crewSeen.length && killReady && now - (brain.lastActionAt || brain.gameStartedAt || now) > 70000 && !room.activeGateLock && B.chance(0.25)) {
+    type = p.x / M.TILE < 70 ? "gateRight" : "gateLeft"; why = "split the crew";
+  }
+  if (!type) return;
   if (!hooks.performSabotage(roomCode, id, type)) {
+    brain.lastActionAt = now;
+    brain.nextSabotageAt = now + rand(50000, 90000);
     B.remember(brain, { kind: "i-sabotaged", what: type });
+    console.log(`[BOTS] ${p.name} sabotage ${type} (${why})`);
+  } else {
+    brain.nextSabotageAt = now + 5000;
   }
 }
 
@@ -502,6 +546,7 @@ function stepBot(roomCode, room, id, p, brain, dtSec, now) {
   if (brain.mode === "hunt") {
     stepHunt(roomCode, room, id, p, brain, brain.seen || [], now);
     if (brain.mode !== "hunt" && brain.mode !== "flee") return;
+    if (brain.waitUntil > now) return; // e.g. the pause right after a kill
   } else {
     if (brain.waitUntil > now) return;
     if (!brain.path || brain.path.length === 0) {

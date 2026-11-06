@@ -15,13 +15,43 @@
 //   NEAR_AI_API_KEY   - enables the LLM (otherwise rule-based fallback)
 //   NEAR_AI_MODEL     - default "z-ai/glm-5.3-flash" (verifiable/TEE model)
 //   NEAR_AI_BASE_URL  - default "https://cloud-api.near.ai/v1"
+//   NEAR_AI_DAILY_BUDGET_USD    - default 1 (UTC day); then rule-based lines
+//   NEAR_AI_MAX_CALLS_PER_MEETING - default 8 per meeting (whole room)
+//
+// Cost control: AI is used where it matters most (a bot with news
+// opening the discussion, and replies when someone names or questions a
+// bot). Quiet bots' votes and small talk use the rule-based lines. Spend
+// is measured from each response's token usage and the model's public
+// price; when the daily budget is used up, bots fall back for the rest
+// of the day. Credits can be topped up on cloud.near.ai, including via
+// NEAR AI's stake-to-compute (staking yield turned into credits).
 // ============================================================
 const B = require("./brain");
 
 const API_KEY = process.env.NEAR_AI_API_KEY || "";
 const MODEL = process.env.NEAR_AI_MODEL || "z-ai/glm-5.3-flash";
 const BASE_URL = (process.env.NEAR_AI_BASE_URL || "https://cloud-api.near.ai/v1").replace(/\/$/, "");
-const AI_TIMEOUT_MS = 12000;
+const AI_TIMEOUT_MS = 9000;
+const SLOW_REPLY_FILLER_MS = 5000;
+const DAILY_BUDGET_USD = Number(process.env.NEAR_AI_DAILY_BUDGET_USD || 1);
+const MAX_AI_CALLS_PER_MEETING = Number(process.env.NEAR_AI_MAX_CALLS_PER_MEETING || 8);
+// $ per 1M tokens; refreshed from NEAR AI's public model list at startup.
+let price = { input: 0.08, output: 0.5 };
+const stats = { day: "", spendUsd: 0, calls: 0, failures: 0, fallbacks: 0, budgetHitLogged: false };
+const today = () => new Date().toISOString().slice(0, 10);
+function rollDay() {
+  if (stats.day !== today()) { stats.day = today(); stats.spendUsd = 0; stats.budgetHitLogged = false; }
+}
+if (API_KEY) {
+  fetch(`${BASE_URL}/model/list`).then((r) => r.json()).then((d) => {
+    const m = (d.models || []).find((x) => x.modelId === MODEL);
+    if (m) {
+      const per = (c) => (c.amount / 10 ** c.scale) * 1e6;
+      price = { input: per(m.inputCostPerToken), output: per(m.outputCostPerToken) };
+      console.log(`[BOTS-AI] ${MODEL} price: $${price.input}/M in, $${price.output}/M out; daily budget $${DAILY_BUDGET_USD}`);
+    }
+  }).catch(() => { /* keep defaults */ });
+}
 const MAX_MSGS_PER_BOT = 4;
 const MIN_GAP_BETWEEN_BOT_MSGS_MS = 2500;
 const MAX_AI_CALLS_PER_MINUTE = 60; // global safety cap on spend
@@ -63,12 +93,19 @@ function memoryLines(memory, now, isSab) {
 }
 
 // ---- NEAR AI Cloud ------------------------------------------------------
-function aiAllowed() {
+function aiAllowed(st) {
   if (!API_KEY) return false;
+  rollDay();
+  if (stats.spendUsd >= DAILY_BUDGET_USD) {
+    if (!stats.budgetHitLogged) { stats.budgetHitLogged = true; console.warn(`[BOTS-AI] daily NEAR AI budget ($${DAILY_BUDGET_USD}) used up - rule-based lines until tomorrow (UTC)`); }
+    return false;
+  }
+  if (st && st.aiCalls >= MAX_AI_CALLS_PER_MEETING) return false;
   const now = Date.now();
   aiCallTimes = aiCallTimes.filter((t) => now - t < 60000);
   if (aiCallTimes.length >= MAX_AI_CALLS_PER_MINUTE) return false;
   aiCallTimes.push(now);
+  if (st) st.aiCalls = (st.aiCalls || 0) + 1;
   return true;
 }
 async function callNearAI(system, user) {
@@ -89,6 +126,10 @@ async function callNearAI(system, user) {
     });
     if (!res.ok) throw new Error(`HTTP ${res.status} ${(await res.text()).slice(0, 160)}`);
     const data = await res.json();
+    stats.calls++;
+    const u = data.usage || {};
+    rollDay();
+    stats.spendUsd += ((u.prompt_tokens || 0) * price.input + (u.completion_tokens || 0) * price.output) / 1e6;
     const content = data && data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content;
     if (!content) throw new Error("empty completion");
     const m = String(content).match(/\{[\s\S]*\}/);
@@ -227,30 +268,34 @@ function fallbackThink(ctx, memory, alreadySaid, mentioned) {
 function stateFor(roomCode, room) {
   let st = rooms.get(roomCode);
   if (!st || st.meetingRef !== room.meeting) {
-    st = { meetingRef: room.meeting, bots: {}, lastBotMsgAt: 0, chatStartedAt: 0 };
+    st = { meetingRef: room.meeting, bots: {}, lastBotMsgAt: 0, chatStartedAt: 0, aiCalls: 0 };
     rooms.set(roomCode, st);
   }
   return st;
 }
 function botState(st, id) {
-  if (!st.bots[id]) st.bots[id] = { said: [], nextActAt: 0, busy: false, vote: null, voted: false, pendingSay: null, mentioned: false, skipped: false };
+  if (!st.bots[id]) st.bots[id] = { said: [], nextActAt: 0, busy: false, vote: null, voted: false, pendingSay: null, mentioned: false, skipped: false, notBefore: 0, usedFiller: false, hasNews: false };
   return st.bots[id];
 }
 
-async function think(room, roomCode, botId, memory, bs, now) {
+async function think(room, roomCode, botId, memory, bs, now, st, purpose) {
   const ctx = buildContext(room, botId, memory, now);
   const mentioned = bs.mentioned;
   bs.mentioned = false;
   let out = null, source = "fallback";
-  if (aiAllowed()) {
+  // Spend AI calls where they matter: openings by bots with news, and
+  // replies when someone talks to the bot. Quiet votes/small talk: rules.
+  const worthIt = purpose === "reply" || (purpose === "open" && bs.hasNews) || (purpose === "chime" && bs.said.length === 0);
+  if (worthIt && aiAllowed(st)) {
     try {
       out = await callNearAI(systemPrompt(ctx), userPrompt(ctx, bs.said));
       source = "near-ai";
     } catch (e) {
-      console.warn(`[BOTS-AI] ${ctx.me.name}: NEAR AI call failed (${e.message}) - using fallback`);
+      stats.failures++;
+      console.warn(`[BOTS-AI] ${ctx.me.name}: NEAR AI call failed (${e.name === "AbortError" ? "timeout" : e.message}) - using fallback`);
     }
   }
-  if (!out || typeof out !== "object") out = fallbackThink(ctx, memory, bs.said, mentioned);
+  if (!out || typeof out !== "object") { stats.fallbacks++; out = fallbackThink(ctx, memory, bs.said, mentioned); }
   let say = typeof out.say === "string" ? out.say.trim() : "";
   // Models sometimes prefix their own name ("Nova: ...") or wrap in quotes.
   const esc = ctx.me.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -277,8 +322,11 @@ function tick(roomCode, room, now, api) {
         const bs = botState(st, id);
         const mem = api.memoryOf(id);
         const hasNews = id === meeting.calledBy || mem.some((m) => m.kind === "kill" || m.kind === "body");
-        // People with news speak first; others chime in later (or not at all).
-        bs.nextActAt = now + (hasNews ? rand(3000, 7000) : (chance(0.75) ? rand(9000, 30000) : rand(40000, 70000)));
+        bs.hasNews = hasNews;
+        // People with news speak first (they start "thinking" right away so
+        // a slow AI reply still lands early); others chime in later or not at all.
+        if (hasNews) { bs.nextActAt = now; bs.notBefore = now + rand(3000, 7000); bs.purpose = "open"; }
+        else { bs.nextActAt = now + (chance(0.75) ? rand(9000, 30000) : rand(40000, 70000)); bs.purpose = "chime"; }
       }
     }
     for (const id of botIds) {
@@ -302,14 +350,28 @@ function tick(roomCode, room, now, api) {
       if (bs.said.length >= MAX_MSGS_PER_BOT) { bs.nextActAt = 0; continue; }
       bs.busy = true;
       bs.nextActAt = 0;
+      const purpose = bs.purpose || "chime";
+      bs.purpose = "chime";
       const mem = api.memoryOf(id);
-      think(room, roomCode, id, mem, bs, now).then(({ say, vote, source }) => {
+      const startedAt = Date.now();
+      // Slow AI while someone is waiting on us: say a quick filler first.
+      const filler = purpose === "reply" && !bs.usedFiller ? setTimeout(() => {
+        if (!bs.busy || room.meeting !== st.meetingRef || meeting.stage !== "chat") return;
+        bs.usedFiller = true;
+        const lang = detectLanguage((meeting.messages || []).filter((m) => room.players[m.senderId] && !room.players[m.senderId].isBot).map((m) => m.text));
+        const text = lang === "hinglish" ? pick(["ek sec", "ruko yaad kar raha", "hmm wait"]) : lang === "hindi" ? pick(["एक सेकंड", "रुको"]) : pick(["hmm 1 sec", "wait let me think", "uhh"]);
+        const res = api.postMeetingChat(roomCode, id, text, null, null);
+        if (res && res.senderId) { bs.said.push(text); st.lastBotMsgAt = Date.now(); }
+      }, SLOW_REPLY_FILLER_MS) : null;
+      think(room, roomCode, id, mem, bs, now, st, purpose).then(({ say, vote, source }) => {
+        if (filler) clearTimeout(filler);
         bs.busy = false;
         if (room.meeting !== st.meetingRef) return; // meeting over
         bs.vote = vote;
-        if (say) {
-          const typingMs = Math.min(7000, 1200 + say.length * 45);
-          bs.pendingSay = { text: say, at: Date.now() + typingMs };
+        if (say && room.meeting.stage === "chat") {
+          // If the AI was slow, "type" faster - the thinking time already passed.
+          const typingMs = Math.min(7000, 1200 + say.length * 45) * (Date.now() - startedAt > 3000 ? 0.4 : 1);
+          bs.pendingSay = { text: say, at: Math.max(Date.now() + typingMs, bs.notBefore || 0) };
           console.log(`[BOTS-AI] ${room.players[id] && room.players[id].name} (${source}): "${say}" -> vote ${vote === "skip" ? "skip" : (room.players[vote] || {}).name}`);
         }
       }).catch((e) => { bs.busy = false; console.warn("[BOTS-AI] think error:", e.message); });
@@ -339,7 +401,7 @@ function tick(roomCode, room, now, api) {
       // Never spoke? Decide quietly now.
       if (!bs.vote) {
         bs.busy = true;
-        think(room, roomCode, id, api.memoryOf(id), bs, now).then(({ vote }) => { bs.busy = false; bs.vote = vote || "skip"; }).catch(() => { bs.busy = false; bs.vote = "skip"; });
+        think(room, roomCode, id, api.memoryOf(id), bs, now, st, "vote").then(({ vote }) => { bs.busy = false; bs.vote = vote || "skip"; }).catch(() => { bs.busy = false; bs.vote = "skip"; });
         continue;
       }
       bs.voted = true;
@@ -365,6 +427,7 @@ function onChat(roomCode, room, message) {
     const named = text.includes(p.name.toLowerCase());
     if (named) {
       bs.mentioned = true;
+      bs.purpose = "reply";
       bs.nextActAt = now + rand(1500, 4000);
     } else if (!fromBot && (isQuestion ? chance(0.45) : chance(0.25))) {
       if (!bs.nextActAt || bs.nextActAt > now + 12000) bs.nextActAt = now + rand(4000, 11000);
@@ -374,8 +437,9 @@ function onChat(roomCode, room, message) {
   }
 }
 
+function aiStats() { rollDay(); return { ...stats, spendUsd: Math.round(stats.spendUsd * 10000) / 10000, budgetUsd: DAILY_BUDGET_USD, model: API_KEY ? MODEL : null }; }
 function aiStatus() {
   return API_KEY ? `NEAR AI Cloud (${MODEL})` : "rule-based fallback (set NEAR_AI_API_KEY to use NEAR AI Cloud)";
 }
 
-module.exports = { tick, onChat, aiStatus, detectLanguage, _internal: { fallbackThink, buildContext, systemPrompt, userPrompt, memoryLines } };
+module.exports = { tick, onChat, aiStatus, aiStats, detectLanguage, _internal: { fallbackThink, buildContext, systemPrompt, userPrompt, memoryLines } };

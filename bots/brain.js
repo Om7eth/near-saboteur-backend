@@ -115,7 +115,8 @@ function setupForGame(room, id, p, brain, now) {
     p.missionsList = brain.tasks.map((t) => ({ room: t.room, label: MISSION_LABEL[t.room], done: false }));
   }
   // Saboteur pacing: don't strike the instant the cooldown ends.
-  brain.killPatienceUntil = now + rand(25000, 45000);
+  // Medium skill: give the crew time to spread out before the first kill.
+  brain.killPatienceUntil = now + rand(35000, 60000);
   brain.nextSabotageAt = now + rand(40000, 80000);
 }
 
