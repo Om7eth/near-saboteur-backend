@@ -86,6 +86,11 @@ app.use(express.json({ limit: "3mb" }));
 // All rooms are stored here (in-memory)
 const rooms = {};
 
+// [AI BOTS - NEAR HACKATHON] Server-side bot players (Free Play only).
+// All bot logic lives in ./bots - see bots/botManager.js for the rules.
+const bots = require("./bots/botManager");
+bots.init({ io, rooms });
+
 // ============================================================
 // [DEV-BRANCH ONLY - PHASE 2 STEP 1] PLAYER ACCOUNT SYSTEM
 // Email + password signup with OTP email verification, backed by
@@ -6597,6 +6602,10 @@ function findActiveRoomForAccount(accountId) {
 // present, falling back to the old "whoever's first" behavior
 // otherwise (non-pool rooms, or the backup already left too).
 function pickNextHost(room, remainingIds) {
+  // [AI BOTS] Defensive: a bot can never be host, even if a caller
+  // passes a list that still includes bots.
+  const humanIds = remainingIds.filter((id) => room.players[id] && !room.players[id].isBot);
+  if (humanIds.length) remainingIds = humanIds;
   if (room.pool && room.pool.backupHostAccountId) {
     const preferred = remainingIds.find((id) => room.players[id].accountId === room.pool.backupHostAccountId);
     if (preferred) return preferred;
@@ -7191,7 +7200,11 @@ function getPlayerList(roomCode) {
     // to Lobby" after the last game ended - lets the Lobby's
     // player-list show who's actually back and ready, vs who's still on
     // their old win-screen.
-    inLobbyView: p.inLobbyView || false,
+    // [AI BOTS] Bots are always "in the Lobby" whenever no match is
+    // running (they have no client to send returnToLobby).
+    inLobbyView: p.isBot ? !room.gameStarted : (p.inLobbyView || false),
+    // [AI BOTS] Lets every client show the BOT tag.
+    isBot: !!p.isBot,
     // [BUG FIX] If this player is dead and has a recorded body position,
     // include it here too - this is what lets a LATE-JOINING or
     // reconnecting player learn about bodies that were already on the
@@ -7269,7 +7282,7 @@ function leaveCurrentRoomIfAny(io, socket) {
   delete oldRoom.players[socket.id];
   socket.leave(oldRoomCode);
 
-  const remaining = Object.keys(oldRoom.players);
+  const remaining = bots.humansRemainingAfterLeave(oldRoom); // [AI BOTS] humans only - an all-bot room counts as empty, and a bot can never be picked as host
   if (remaining.length === 0) {
     if (wasGameStarted) {
       markRoomMessageClosedForever(oldRoom); // [NEW FEATURE] fire-and-forget
@@ -8668,7 +8681,8 @@ io.on("connection", (socket) => {
 
     // Find the player slot (under their OLD socket.id) matching this token
     const oldId = Object.keys(room.players).find(
-      (id) => room.players[id].playerToken === playerToken
+      // [AI BOTS] a client can never "reconnect" into a bot's seat
+      (id) => !room.players[id].isBot && room.players[id].playerToken === playerToken
     );
 
     // [BUG FIX - AUTO-CONFIRM TIMER NEVER CANCELLED ON RECONNECT] Only
@@ -8979,7 +8993,7 @@ io.on("connection", (socket) => {
       return;
     }
 
-    const remaining = Object.keys(room.players);
+    const remaining = bots.humansRemainingAfterLeave(room); // [AI BOTS] humans only - an all-bot room counts as empty, and a bot can never be picked as host
     if (remaining.length === 0) {
       if (wasGameStarted) {
         // [CRITICAL BUG FIX - SAME FUND-LOSS GAP AS THE DISCONNECT
@@ -9044,6 +9058,63 @@ io.on("connection", (socket) => {
   // (gameStarted === false) - once a match is live, removing a player
   // has entirely different implications (alive/dead state, win
   // conditions) that this isn't meant to cover.
+  // ---- [AI BOTS - NEAR HACKATHON] ADD / REMOVE BOT ----
+  // Host-only, Lobby-only, Free Play only (bots.addBot refuses any room
+  // with a pool, i.e. Pool and Paid rooms). Bots never get an accountId,
+  // so they can't earn points or touch any wallet/contract.
+  // Client sends: addBot(_, ack) / removeBot({ botId }, ack)
+  socket.on("addBot", (_data, ack) => {
+    const reply = typeof ack === "function" ? ack : () => {};
+    const roomCode = socket.data.roomCode;
+    const room = rooms[roomCode];
+    if (!room) return reply({ ok: false, error: "Room not found." });
+    if (!room.players[socket.id] || !room.players[socket.id].isHost) {
+      return reply({ ok: false, error: "Only the host can add bots." });
+    }
+    const result = bots.addBot(room);
+    if (!result.ok) return reply(result);
+    io.to(roomCode).emit("playerListUpdated", { players: getPlayerList(roomCode) });
+    // The bot says hi in lobby chat, so every player (not just the host)
+    // sees that an AI bot joined. Same message shape as a human's.
+    const bot = room.players[result.botId];
+    const hello = {
+      id: `${result.botId}-${Date.now()}`,
+      senderId: result.botId,
+      senderName: bot.name,
+      senderAvatar: bot.avatarId,
+      senderAvatarVariant: null,
+      senderHasPlayPass: false,
+      senderHasLegionBadge: false,
+      text: "Hi! I'm an AI bot. Joined the room 👋",
+      gifUrl: null,
+      timestamp: Date.now(),
+      replyTo: null,
+    };
+    room.lobbyChat = room.lobbyChat || [];
+    room.lobbyChat.push(hello);
+    if (room.lobbyChat.length > 200) room.lobbyChat = room.lobbyChat.slice(-200);
+    io.to(roomCode).emit("lobbyChatMessageReceived", hello);
+    postOrUpdateRoomMessage(room);
+    console.log(`[BOTS] ${result.name} (${result.botId}) added to room ${roomCode}`);
+    reply({ ok: true, botId: result.botId });
+  });
+
+  socket.on("removeBot", ({ botId } = {}, ack) => {
+    const reply = typeof ack === "function" ? ack : () => {};
+    const roomCode = socket.data.roomCode;
+    const room = rooms[roomCode];
+    if (!room) return reply({ ok: false, error: "Room not found." });
+    if (!room.players[socket.id] || !room.players[socket.id].isHost) {
+      return reply({ ok: false, error: "Only the host can remove bots." });
+    }
+    const result = bots.removeBot(room, botId);
+    if (!result.ok) return reply(result);
+    io.to(roomCode).emit("playerListUpdated", { players: getPlayerList(roomCode) });
+    postOrUpdateRoomMessage(room);
+    console.log(`[BOTS] ${botId} removed from room ${roomCode}`);
+    reply({ ok: true });
+  });
+
   socket.on("kickPlayer", async ({ targetId }) => {
     const roomCode = socket.data.roomCode;
     const room = rooms[roomCode];
@@ -9058,6 +9129,15 @@ io.on("connection", (socket) => {
     }
     if (!targetId || targetId === socket.id || !room.players[targetId]) {
       socket.emit("kickError", { message: "That player isn't in this room anymore." });
+      return;
+    }
+    // [AI BOTS] Removing a bot is just a bot removal - none of the human
+    // kick side effects (leaderboard snapshot, pool refund, etc.) apply.
+    if (room.players[targetId].isBot) {
+      const result = bots.removeBot(room, targetId);
+      if (!result.ok) { socket.emit("kickError", { message: result.error }); return; }
+      io.to(roomCode).emit("playerListUpdated", { players: getPlayerList(roomCode) });
+      postOrUpdateRoomMessage(room);
       return;
     }
 
@@ -9102,7 +9182,7 @@ io.on("connection", (socket) => {
     }
     io.to(targetId).emit("kickedByHost", { hostName });
 
-    const remaining = Object.keys(room.players);
+    const remaining = bots.humansRemainingAfterLeave(room); // [AI BOTS] humans only - an all-bot room counts as empty, and a bot can never be picked as host
     if (remaining.length === 0) {
       scheduleRoomEmptyClose(roomCode);
       console.log(`Room ${roomCode} empty (Lobby) after kick - auto-closing in 3 min unless someone returns`);
@@ -9380,7 +9460,7 @@ io.on("connection", (socket) => {
         snapshotRoomLeaderboardOnDeparture(room, room.players[id].accountId, room.players[id].name, room.players[id].avatarId, room.players[id].hasLegionBadge, room.players[id].avatarVariantId, room.players[id].hasPlayPass);
         delete room.players[id];
         if (wasHost) {
-          const remaining = Object.keys(room.players);
+          const remaining = bots.humansRemainingAfterLeave(room); // [AI BOTS] humans only - an all-bot room counts as empty, and a bot can never be picked as host
           if (remaining.length > 0) {
             const nextHostId = pickNextHost(room, remaining);
             room.players[nextHostId].isHost = true;
@@ -9440,7 +9520,7 @@ io.on("connection", (socket) => {
         if (stillRoom.players[hostId].inLobbyView) return; // host came back in time
         if (stillRoom.gameStarted) return; // a new game already started since
         const candidateId = Object.keys(stillRoom.players).find(
-          (id) => id !== hostId && stillRoom.players[id].inLobbyView
+          (id) => id !== hostId && stillRoom.players[id].inLobbyView && !stillRoom.players[id].isBot // [AI BOTS] never a bot
         );
         if (candidateId) {
           stillRoom.players[hostId].isHost = false;
@@ -9683,7 +9763,11 @@ io.on("connection", (socket) => {
       return pl.accountId || pl.playerToken || id;
     };
     const rand01 = () => crypto.randomInt(0, 1_000_000) / 1_000_000;
-    const pool = playerIds.map((id) => ({ id, w: 1 / (1 + 2 * (room.saboteurStreak[streakKey(id)] || 0)) }));
+    // [AI BOTS] Only ids allowed to be Saboteur go into the draw (bots
+    // are crew-only until saboteur bots can actually kill - see
+    // BOTS_CAN_BE_SABOTEUR in bots/botManager.js). Rooms without bots get
+    // exactly the same list as before.
+    const pool = bots.saboteurCandidateIds(room, playerIds).map((id) => ({ id, w: 1 / (1 + 2 * (room.saboteurStreak[streakKey(id)] || 0)) }));
     const pickedIds = [];
     for (let n = 0; n < saboteurCount && pool.length > 0; n++) {
       const total = pool.reduce((sum, p) => sum + p.w, 0);
@@ -9693,6 +9777,9 @@ io.on("connection", (socket) => {
       pickedIds.push(pool[idx].id);
       pool.splice(idx, 1);
     }
+    // [AI BOTS] With a restricted candidate list fewer Saboteurs than
+    // requested may be drawn - keep the count sent to clients truthful.
+    saboteurCount = pickedIds.length;
     const saboteurIds = new Set(pickedIds);
     const nextStreak = {};
     playerIds.forEach((id) => {
@@ -9857,6 +9944,9 @@ io.on("connection", (socket) => {
       }
       io.to(id).emit("roleAssigned", payload);
     });
+
+    // [AI BOTS] Place bots on their spawn points and start their brains.
+    bots.onGameStarted(roomCode, room, playerIds);
 
     console.log(`Game started in room ${roomCode}. ${saboteurCount} saboteur(s) assigned. Speed level: ${clampedSpeedLevel}.`);
   });
@@ -11342,7 +11432,7 @@ io.on("connection", (socket) => {
           });
           snapshotRoomLeaderboardOnDeparture(stillRoom, stillRoom.players[socket.id].accountId, stillRoom.players[socket.id].name, stillRoom.players[socket.id].avatarId, stillRoom.players[socket.id].hasLegionBadge, stillRoom.players[socket.id].avatarVariantId, stillRoom.players[socket.id].hasPlayPass);
           delete stillRoom.players[socket.id];
-          const remaining = Object.keys(stillRoom.players);
+          const remaining = bots.humansRemainingAfterLeave(stillRoom); // [AI BOTS] humans only - an all-bot room counts as empty, and a bot can never be picked as host
           if (remaining.length === 0) {
             // [CRITICAL BUG FIX - REAL FUND LOSS] This used to just
             // delete the room outright with no refund/settlement
@@ -11469,7 +11559,7 @@ io.on("connection", (socket) => {
         }
         snapshotRoomLeaderboardOnDeparture(stillRoom, stillPlayer.accountId, stillPlayer.name, stillPlayer.avatarId, stillPlayer.hasLegionBadge, stillPlayer.avatarVariantId, stillPlayer.hasPlayPass);
         delete stillRoom.players[socket.id];
-        const stillRemaining = Object.keys(stillRoom.players);
+        const stillRemaining = bots.humansRemainingAfterLeave(stillRoom); // [AI BOTS] humans only - an all-bot room counts as empty, and a bot can never be picked as host
         if (stillRemaining.length === 0) {
           scheduleRoomEmptyClose(roomCode);
           console.log(`Room ${roomCode} empty (Lobby grace expired) - auto-closing in 3 min unless someone returns`);
@@ -11547,6 +11637,7 @@ setInterval(() => {
     Object.keys(room.players).forEach((id) => {
       const p = room.players[id];
       if (!p || p.role !== "crewmate") return;
+      if (p.isBot) return; // [AI BOTS] the inactivity kick is for AFK humans only
       if (p.disconnectedAt) return; // mid-grace-period - not actively playing right now anyway
       const total = p.missionsTotal || 0;
       const done = p.missionsDone || 0;
@@ -11569,7 +11660,7 @@ setInterval(() => {
         delete room.players[id];
         console.log(`${playerName} kicked from room ${roomCode} for mission inactivity`);
 
-        const remaining = Object.keys(room.players);
+        const remaining = bots.humansRemainingAfterLeave(room); // [AI BOTS] humans only - an all-bot room counts as empty, and a bot can never be picked as host
         if (remaining.length === 0) {
           markRoomMessageClosedForever(room); // fire-and-forget
           delete rooms[roomCode];
