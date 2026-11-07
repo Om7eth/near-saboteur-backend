@@ -4,7 +4,9 @@
 // Accounts (all sub-accounts of SABOTEUR_PARENT_ACCOUNT_ID, all controlled
 // by the one server key, so players never sign anything):
 //   token.<parent>         NEP-141 contract (scripts/setup-saboteur-token.mjs)
-//   treasury.<parent>      holds the supply, pays every reward
+//   treasury.<parent>      holds the supply - COLD key, offline, the server can't touch it
+//   rewards.<parent>       small hot wallet the server pays every reward from
+//   bots.<parent>          Bot Treasury - bot earnings above the per-bot cap (cold key)
 //   bot-<name>.<parent>    one per AI bot persona
 //   p-<accountId>.<parent> made automatically the first time a player earns
 //
@@ -20,6 +22,8 @@ const RPC_URL = process.env.SABOTEUR_RPC_URL || "https://test.rpc.fastnear.com";
 const DECIMALS = 18n;
 const TOKEN = PARENT ? `token.${PARENT}` : "";
 const TREASURY = PARENT ? `treasury.${PARENT}` : "";
+const REWARDS = PARENT ? `rewards.${PARENT}` : "";
+const BOT_TREASURY = PARENT ? `bots.${PARENT}` : "";
 const EXPLORER = "https://testnet.nearblocks.io";
 
 let nearPromise = null;
@@ -32,7 +36,7 @@ async function chain() {
   ctx = {
     near, provider,
     parent: new near.Account(PARENT, provider, KEY),
-    treasury: new near.Account(TREASURY, provider, KEY),
+    rewards: new near.Account(REWARDS, provider, KEY), // the only wallet the server pays from
     publicKey: near.KeyPair.fromString(KEY).getPublicKey().toString(),
   };
   return ctx;
@@ -74,7 +78,7 @@ async function view(method, args) {
 
 // Make sure a wallet exists and can hold $SABOTEUR. Parent pays (testnet).
 async function ensureWallet(id) {
-  if (known.has(id)) return;
+  if (known.has(id) || id === BOT_TREASURY) return; // Bot Treasury is set up once by the secure script
   const { near, parent, publicKey } = await chain();
   if (!(await accountExists(id))) {
     const prefix = id.slice(0, -(PARENT.length + 1));
@@ -92,15 +96,15 @@ async function ensureWallet(id) {
 }
 
 // payouts: [{ wallet, amount }] (whole tokens). One transaction from the
-// treasury with one ft_transfer per receiver. Resolves { ok, txHash, error }.
+// rewards wallet with one ft_transfer per receiver. Resolves { ok, txHash, error }.
 function payMatch(payouts, memo) {
   const list = (payouts || []).filter((p) => p.wallet && Number(p.amount) > 0);
   if (!configured() || !list.length) return Promise.resolve({ ok: false, error: configured() ? "nothing to pay" : "not configured" });
   return enqueue(async () => {
     try {
-      const { near, treasury } = await chain();
+      const { near, rewards } = await chain();
       for (const p of list) await ensureWallet(p.wallet);
-      const res = await treasury.signAndSendTransaction({
+      const res = await rewards.signAndSendTransaction({
         receiverId: TOKEN,
         actions: list.map((p) => near.actions.functionCall(
           "ft_transfer", { receiver_id: p.wallet, amount: toUnits(p.amount), memo: memo || null }, near.teraToGas("12"), 1n,
@@ -122,5 +126,5 @@ async function balanceOf(wallet) {
 
 module.exports = {
   configured, walletForBot, walletForPlayer, payMatch, balanceOf, ensureWallet,
-  explorerAccount, explorerTx, TOKEN, TREASURY, PARENT,
+  explorerAccount, explorerTx, TOKEN, TREASURY, REWARDS, BOT_TREASURY, PARENT,
 };

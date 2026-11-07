@@ -21,6 +21,7 @@ const ledgerSchema = new mongoose.Schema({
   backs: { type: [{ target: String, correct: Boolean, delta: Number }], default: [] },
   multiplier: Number,
   reducedForDay: Boolean,
+  toBotTreasury: Boolean,                    // bot was over its cap: paid to the Bot Treasury
   amount: Number,                            // whole $SABOTEUR
   status: { type: String, enum: ["pending", "sent", "failed", "skipped"], default: "pending", index: true },
   txHash: String,
@@ -91,6 +92,18 @@ async function settleMatch({ io, roomCode, room, computePoints, hasDb }) {
       for (const a of agg) todayCounts[a._id] = a.n;
     }
 
+    // Bot cap: a bot already at/over RULES.botBalanceCap sends this match's
+    // reward to the Bot Treasury instead of its own wallet.
+    const botNames = rows.filter((r) => r.p.isBot).map((r) => r.p.name);
+    const botEarned = {};
+    if (hasDb && botNames.length) {
+      const agg = await TokenLedger.aggregate([
+        { $match: { holderType: "bot", holderId: { $in: botNames }, toBotTreasury: { $ne: true }, status: { $in: ["sent", "pending", "failed"] } } },
+        { $group: { _id: "$holderId", sum: { $sum: "$amount" } } },
+      ]).catch(() => []);
+      for (const a of agg) botEarned[a._id] = a.sum;
+    }
+
     const mult = humanMultiplier(humans);
     for (const r of rows) {
       const { p } = r;
@@ -101,7 +114,8 @@ async function settleMatch({ io, roomCode, room, computePoints, hasDb }) {
       const reducedForDay = !p.isBot && (todayCounts[p.accountId] || 0) >= RULES.dailyFullMatches;
       r.reducedForDay = reducedForDay;
       r.amount = eligible ? rewardFor(r.rank, humans, { reducedForDay }) : 0;
-      r.wallet = !T.configured() || !eligible ? null : (p.isBot ? T.walletForBot(p.name) : T.walletForPlayer(p.accountId));
+      r.toBotTreasury = !!(p.isBot && T.BOT_TREASURY && (botEarned[p.name] || 0) >= RULES.botBalanceCap);
+      r.wallet = !T.configured() || !eligible ? null : (p.isBot ? (r.toBotTreasury ? T.BOT_TREASURY : T.walletForBot(p.name)) : T.walletForPlayer(p.accountId));
       r.holderType = holderType;
       r.holderId = p.isBot ? p.name : (p.accountId || null);
       r.guest = !p.isBot && !p.accountId;
@@ -120,7 +134,7 @@ async function settleMatch({ io, roomCode, room, computePoints, hasDb }) {
     const docs = await TokenLedger.insertMany(rows.filter((r) => r.holderId).map((r) => ({
       matchId, roomCode, holderType: r.holderType, holderId: r.holderId, name: r.p.name, wallet: r.wallet,
       rank: r.rank, players: rows.length, humans, points: r.points, backs: r.backs, multiplier: mult,
-      reducedForDay: !!r.reducedForDay, amount: r.amount, status: r.amount > 0 && r.wallet ? "pending" : "skipped",
+      reducedForDay: !!r.reducedForDay, toBotTreasury: !!r.toBotTreasury, amount: r.amount, status: r.amount > 0 && r.wallet ? "pending" : "skipped",
     }))).catch((e) => { console.warn("[SABOTEUR] ledger write failed:", e.message); return []; });
 
     payPending(docs.filter((d) => d.status === "pending"), matchId);
@@ -197,7 +211,8 @@ async function botsSummary(botNames) {
   }));
   const data = {
     token: "SABOTEUR", network: "testnet", tokenContract: T.TOKEN, tokenUrl: T.TOKEN ? `https://testnet.nearblocks.io/token/${T.TOKEN}` : null,
-    treasury: T.TREASURY, treasuryBalance: T.configured() ? await T.balanceOf(T.TREASURY) : null, bots,
+    treasury: T.TREASURY, treasuryBalance: T.configured() ? await T.balanceOf(T.TREASURY) : null,
+    botTreasury: T.BOT_TREASURY, botTreasuryBalance: T.configured() ? await T.balanceOf(T.BOT_TREASURY) : null, botCap: RULES.botBalanceCap, bots,
   };
   botCache = { at: Date.now(), data };
   return data;
@@ -217,8 +232,11 @@ async function adminSummary() {
       { $sort: { matches: -1 } },
     ]),
   ]);
+  const rewardsBalance = T.configured() ? await T.balanceOf(T.REWARDS) : null;
   return {
     token: T.TOKEN, treasury: T.TREASURY, treasuryBalance: T.configured() ? await T.balanceOf(T.TREASURY) : null,
+    rewards: T.REWARDS, rewardsBalance, rewardsLow: rewardsBalance != null && rewardsBalance < RULES.rewardsLowWarning,
+    botTreasury: T.BOT_TREASURY, botTreasuryBalance: T.configured() ? await T.balanceOf(T.BOT_TREASURY) : null,
     totals, last24: last24.map((x) => ({ holderType: x._id, amount: x.amount, matches: x.matches.length })), topPlayers, farmFlags: farm,
     rules: RULES,
   };

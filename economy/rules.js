@@ -38,9 +38,20 @@ const RULES = {
   afterDailyMultiplier: 0.25,    // 6th+ match of the day pays 25%
   noSignupBonus: true,           // tokens only ever come from finished matches
 
+  // ---- Safety ----
+  // The server only holds a SMALL hot wallet (rewards.<parent>); the big
+  // treasury and the token contract are on a key kept offline.
+  rewardsLowWarning: 50000,      // admin dashboard warns below this - refill rewards from the treasury
+  botBalanceCap: 50000,          // a bot earning past this sends its rewards to the Bot Treasury instead
+  // Players can NOT send or transfer $SABOTEUR: their wallet is made and
+  // held by the game (no key is ever given out) and there is no transfer
+  // feature. Tokens only arrive as match rewards.
+  playerTransfers: false,
+
   // ---- Bots ----
   // Bots rank and earn exactly like people. Their tokens stay in their own
-  // wallet (bot-<name>.<parent>) as the Bot Treasury - for NEAR AI credits,
+  // wallet (bot-<name>.<parent>) - up to botBalanceCap, the rest goes to the
+  // Bot Treasury (bots.<parent>) - for NEAR AI credits,
   // game improvements, airdrops or campaigns, decided by the game owner.
   botsEarn: true,
   // A bot backs its vote only with real evidence from its memory (saw the

@@ -952,11 +952,14 @@
       const tok = d.token ? `https://testnet.nearblocks.io/token/${esc(d.token)}` : '';
       wrap.innerHTML = `
         <div class="stat-grid" style="margin-bottom:10px;">
-          <div class="stat-card"><div class="num">${d.treasuryBalance == null ? '—' : fmt(d.treasuryBalance)}</div><div class="label">TREASURY (OF 1,000,000,000)</div></div>
+          <div class="stat-card" style="${d.rewardsLow ? 'border-color:rgba(255,92,92,0.6);' : ''}"><div class="num">${d.rewardsBalance == null ? '—' : fmt(d.rewardsBalance)}</div><div class="label">REWARDS WALLET (SERVER PAYS FROM HERE)</div></div>
+          <div class="stat-card"><div class="num">${d.treasuryBalance == null ? '—' : fmt(d.treasuryBalance)}</div><div class="label">TREASURY (COLD KEY, OFFLINE)</div></div>
+          <div class="stat-card"><div class="num">${d.botTreasuryBalance == null ? '—' : fmt(d.botTreasuryBalance)}</div><div class="label">BOT TREASURY (OVER-CAP BOT EARNINGS)</div></div>
           <div class="stat-card"><div class="num">${fmt(paidPlayers)}</div><div class="label">PAID TO PLAYERS</div></div>
           <div class="stat-card"><div class="num">${fmt(paidBots)}</div><div class="label">PAID TO BOTS (BOT TREASURY)</div></div>
           <div class="stat-card"><div class="num">${fmt(waiting)}</div><div class="label">WAITING / RETRYING</div></div>
         </div>
+        ${d.rewardsLow ? `<div class="card" style="border-color:rgba(255,92,92,0.6);"><h3 style="color:#ff8a8a;">⚠ Rewards wallet is running low</h3><p style="font-size:12px;margin:0;">Refill ${esc(d.rewards)} from the treasury (cold key on your Mac) - otherwise new rewards will wait as "retrying".</p></div>` : ''}
         <div class="card"><h3 style="color:#ffd75e;">Token</h3>
           <p style="font-size:12px;margin:0;">${tok ? `<a href="${tok}" target="_blank" rel="noopener">${esc(d.token)}</a>` : 'Not configured'} · treasury ${esc(d.treasury || '—')} · testnet, no real value</p>
           <p style="font-size:11px;color:#6a7570;margin:6px 0 0;">Last 24h: ${(d.last24 || []).map((x) => `${esc(x.holderType)} ${fmt(x.amount)} over ${x.matches} matches`).join(' · ') || 'nothing yet'}</p>
