@@ -8716,7 +8716,7 @@ io.on("connection", (socket) => {
       code,
       players: getPlayerList(code),
       playerToken,
-      speedLevel: rooms[code].speedLevel,
+      speedLevel: rooms[code].speedLevel || 1,
       isPublic: rooms[code].isPublic,
       devMode: rooms[code].devMode,
       pool: rooms[code].pool,
@@ -8735,7 +8735,7 @@ io.on("connection", (socket) => {
       code,
       players: getPlayerList(code),
       playerToken,
-      speedLevel: rooms[code].speedLevel,
+      speedLevel: rooms[code].speedLevel || 1,
       isPublic: rooms[code].isPublic,
       devMode: rooms[code].devMode,
       pool: rooms[code].pool,
@@ -8946,7 +8946,7 @@ io.on("connection", (socket) => {
       delete room.players[oldId];
       room.players[socket.id] = playerData;
       const oldSocket = io.sockets.sockets.get(oldId);
-      if (oldSocket && oldSocket.connected) oldSocket.disconnect(true);
+      if (oldSocket && oldSocket.connected) { oldSocket.emit("sessionMovedElsewhere"); oldSocket.disconnect(true); }
     } else if (!oldId) {
       // Genuinely new to this room's socket-side player list (e.g. the
       // host, right after create_pool, entering for the first time).
@@ -9520,6 +9520,9 @@ io.on("connection", (socket) => {
       // after a refresh.
       const oldSocket = io.sockets.sockets.get(oldId);
       if (oldSocket && oldSocket.connected) {
+        // Tell that tab/device why, so it stops trying to win the seat back
+        // (two open tabs used to kick each other in an endless rejoin loop).
+        oldSocket.emit("sessionMovedElsewhere");
         oldSocket.disconnect(true);
       }
     }
@@ -10193,7 +10196,8 @@ io.on("connection", (socket) => {
     delete room.winner;
     delete room.meeting;
     delete room.meetingCooldownUntil;
-    delete room.speedLevel;
+    // speedLevel is kept: it's the host's choice and everyone still in the
+    // lobby is moving at it, so a new joiner must get the same value.
     delete room.activeGateLock;
     delete room.activeSabotageType;
     delete room.departedCrewmateMissions;
@@ -10316,7 +10320,8 @@ io.on("connection", (socket) => {
     delete room.winner;
     delete room.meeting;
     delete room.meetingCooldownUntil;
-    delete room.speedLevel;
+    // speedLevel is kept: it's the host's choice and everyone still in the
+    // lobby is moving at it, so a new joiner must get the same value.
     // [BUG FIX] These two were already cleared by returnToLobby but were
     // missing here - if a game ended (gameOver) while a gate-lock or
     // electricity/hacker sabotage was still active, that stale state
