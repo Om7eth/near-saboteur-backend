@@ -3330,6 +3330,19 @@ const USERNAME_REGEX = /^[a-z0-9_]{3,20}$/;
 // Lobby (per-match, room-scoped) only, never on the account profile.
 // Also used for LATER edits (via Settings → Profile), not just the
 // initial post-wallet setup - same endpoint, same validation either way.
+// [ONBOARDING] Live "available ✓ / taken" while a new player types their
+// username. Same rules as /profile/setup; the setup call still re-checks.
+app.get("/profile/username-available", async (req, res) => {
+  try {
+    const username = String(req.query.username || "").trim().toLowerCase();
+    if (!USERNAME_REGEX.test(username)) return res.json({ ok: false, reason: "format" });
+    if (!MONGODB_URI) return res.json({ ok: true });
+    const me = req.query.sessionToken ? await Player.findOne({ sessionToken: String(req.query.sessionToken) }).select("_id") : null;
+    const taken = await Player.exists(me ? { username, _id: { $ne: me._id } } : { username });
+    res.json({ ok: !taken, reason: taken ? "taken" : null });
+  } catch (e) { res.status(500).json({ ok: false, reason: "error" }); }
+});
+
 app.post("/profile/setup", async (req, res) => {
   try {
     const name = String(req.body.name || "").trim().slice(0, 16);
