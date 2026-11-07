@@ -4311,130 +4311,175 @@ app.get("/activity/games", async (req, res) => {
       return res.status(401).json({ message: "Session expired. Please log in again." });
     }
 
-    // Pull a generous recent batch of this player's own records - more
-    // than 20 raw records, since several can belong to the same game
-    // (a 3-match pool, or an unlimited Free Play session) and still
-    // only count as ONE game toward the 20-game limit.
+    // Pull a generous recent batch of this player's own records - several
+    // can belong to the same game (a 3-match pool, or a long Free Play
+    // session) and still only count as ONE game toward the 20-game limit.
     const myRecords = await MatchRecord.find({ playerId: me._id })
       .sort({ earnedAt: -1 })
-      .limit(300);
+      .limit(300)
+      .lean();
 
-    // Group by roomSessionId (the permanent id) - falls back to
-    // roomCode only for older records written before that field
-    // existed, since those can't be grouped any more precisely than
-    // that (a real but unavoidable gap for pre-existing history).
-    const groups = new Map(); // groupKey -> { records: [...], mostRecentAt }
-    for (const r of myRecords) {
-      const key = r.roomSessionId || `legacy:${r.roomCode}`;
+    // [ACTIVITY FIX] Group by roomSessionId. Older records only have a
+    // (reused) roomCode - those are now also split wherever there's a
+    // gap of 3h+ between matches, so two unrelated games that landed on
+    // the same code are no longer merged into one card.
+    const LEGACY_GAP_MS = 3 * 3600 * 1000;
+    const groups = new Map(); // key -> { records: [], mostRecentAt }
+    const legacyCursor = new Map(); // roomCode -> { key, oldestAt }
+    for (const r of myRecords) { // newest first
+      let key = r.roomSessionId;
+      if (!key) {
+        const cur = legacyCursor.get(r.roomCode);
+        if (cur && cur.oldestAt - new Date(r.earnedAt).getTime() < LEGACY_GAP_MS) key = cur.key;
+        else key = `legacy:${r.roomCode}:${new Date(r.earnedAt).getTime()}`;
+        legacyCursor.set(r.roomCode, { key, oldestAt: new Date(r.earnedAt).getTime() });
+      }
       if (!groups.has(key)) groups.set(key, { records: [], mostRecentAt: r.earnedAt });
       groups.get(key).records.push(r);
     }
 
-    // Most-recently-played games first, capped to the last 20 GAMES
-    // (not matches) - exactly Om7eth's spec.
     const orderedGroups = [...groups.entries()]
-      .sort((a, b) => b[1].mostRecentAt - a[1].mostRecentAt)
+      .sort((a, b) => new Date(b[1].mostRecentAt) - new Date(a[1].mostRecentAt))
       .slice(0, 20);
+
+    // [ACTIVITY FIX] $SABOTEUR earned per match was only visible in the
+    // wallet - join it in here by matchId so each match shows its reward.
+    const matchIds = [...new Set(orderedGroups.flatMap(([, g]) => g.records.map((r) => r.matchId)).filter(Boolean))];
+    const tokenByMatch = new Map();
+    if (matchIds.length) {
+      try {
+        const rows = await economy.TokenLedger.find({ holderType: "player", holderId: String(me._id), matchId: { $in: matchIds } }).lean();
+        for (const t of rows) tokenByMatch.set(t.matchId, t);
+      } catch (_) { /* token rewards are optional extra info */ }
+    }
+    const tokenInfo = (t) => (t ? {
+      amount: t.amount || 0, status: t.status, rank: t.rank || null, players: t.players || null,
+      txUrl: t.txHash && saboteurToken.explorerTx ? saboteurToken.explorerTx(t.txHash) : null,
+    } : null);
+
+    const modeOf = (r) => r.gameMode || (r.isPoolGame ? "pool" : "free");
 
     const games = [];
     for (const [groupKey, group] of orderedGroups) {
-      // Chronological within the game (oldest match first, "Match 1, 2, 3...")
-      const records = group.records.sort((a, b) => a.earnedAt - b.earnedAt).slice(-20); // last 20 matches within this one game, per Om7eth's spec for unlimited Free Play sessions
+      // Chronological within the game: "Match 1, 2, 3..."
+      const records = group.records.sort((a, b) => new Date(a.earnedAt) - new Date(b.earnedAt)).slice(-20);
       const first = records[0];
-      const isPaid = !!first.isPoolGame;
-      const displayName = first.poolName || first.roomCode || "Game";
-      // [NEW FEATURE - FINANCIALS] Only ONE record in the group actually
-      // has these set (see this endpoint's own top comment for why) -
-      // find whichever one does, since it's the same fact for the whole
-      // game either way.
-      const withFinancials = records.find((r) => typeof r.entryFeeNear === "number");
-      const entryFeeNear = withFinancials ? withFinancials.entryFeeNear : null;
-      const poolNearWon = withFinancials ? withFinancials.poolNearWon : null;
+      const last = records[records.length - 1];
+      const mode = modeOf(last);
+      const isPaid = mode !== "free"; // pool/paid/sponsor all carry NEAR financials
+      const displayName = last.poolName || first.poolName || last.roomCode || "Game";
+      const withFinancials = records.find((r) => typeof r.entryFeeNear === "number" || typeof r.poolNearWon === "number");
+      const entryFeeNear = withFinancials && typeof withFinancials.entryFeeNear === "number" ? withFinancials.entryFeeNear : null;
+      const poolNearWon = withFinancials && typeof withFinancials.poolNearWon === "number" ? withFinancials.poolNearWon : null;
+      const myRankRec = records.find((r) => typeof r.poolRank === "number");
 
       let topThree = null;
       if (isPaid && first.roomSessionId) {
-        // [NEW FEATURE - TOP 3 + PAYOUTS] Aggregate points across EVERY
-        // participant in this exact game (not just this player), same
-        // ranking logic distributePoolPrizes itself used at settlement
-        // time, then join in live Player data (name/username/avatarId/
-        // hasLegionBadge) - live, not frozen, matching the standing rule
-        // that a badge/username always reflects the CURRENT state
-        // wherever it's shown.
-        // [BUG FIX - A PLAYER WHO GENUINELY PLACED TOP 3 COULD BE
-        // MISSING FROM THIS LIST] This used to rank by `points` (the
-        // amount actually awarded, AFTER each player's own personal
-        // daily diminishing-returns cap). That's the right number for
-        // "how much did this add to my total", but the WRONG number for
-        // "who actually did best in this match" - two players could
-        // have identical real performance, and the one who happened to
-        // have already played more matches earlier that same day would
-        // rank artificially lower here, even dropping out of the top 3
-        // entirely, purely because of an unrelated personal daily limit.
-        // Ranking by rawPoints (the un-reduced performance total)
-        // instead fixes that AND makes this list agree with who
-        // actually got paid - distributePoolPrizes itself ranks by
-        // room.pool.leaderboard, which is built from that same raw,
-        // un-reduced pendingPoints value.
-        const allRecordsThisGame = await MatchRecord.find({ roomSessionId: first.roomSessionId });
-        const pointsByPlayer = new Map();
-        const financialsByPlayer = new Map();
+        // Rank by raw (un-capped) performance, same as distributePoolPrizes.
+        // [ACTIVITY FIX] When the pool actually paid out, the real payout
+        // rank (poolRank) wins over the recomputed one, so this list
+        // always agrees with who actually got paid.
+        const allRecordsThisGame = await MatchRecord.find({ roomSessionId: first.roomSessionId }).lean();
+        const byPlayer = new Map();
         for (const r of allRecordsThisGame) {
           const pid = r.playerId.toString();
-          // Older records written before rawPoints existed fall back to
-          // `points` - the best available answer for that historical data.
-          const perfPoints = typeof r.rawPoints === "number" && r.rawPoints > 0 ? r.rawPoints : r.points;
-          pointsByPlayer.set(pid, (pointsByPlayer.get(pid) || 0) + perfPoints);
-          if (typeof r.poolNearWon === "number" && !financialsByPlayer.has(pid)) {
-            financialsByPlayer.set(pid, r.poolNearWon);
-          }
+          const perf = typeof r.rawPoints === "number" && r.rawPoints > 0 ? r.rawPoints : r.points;
+          const e = byPlayer.get(pid) || { points: 0, nearWon: null, paidRank: null };
+          e.points += perf || 0;
+          if (typeof r.poolNearWon === "number" && e.nearWon == null) e.nearWon = r.poolNearWon;
+          if (typeof r.poolRank === "number" && e.paidRank == null) e.paidRank = r.poolRank;
+          byPlayer.set(pid, e);
         }
-        const ranked = [...pointsByPlayer.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3);
+        const ranked = [...byPlayer.entries()].sort((a, b) => {
+          const ra = a[1].paidRank ?? 99, rb = b[1].paidRank ?? 99;
+          return ra !== rb ? ra - rb : b[1].points - a[1].points;
+        }).slice(0, 3);
         const rankedPlayers = await Player.find(
           { _id: { $in: ranked.map(([pid]) => pid) } },
           "name username avatarId hasLegionBadge premiumUntil activePremiumAvatarVariant"
         );
         const playerById = new Map(rankedPlayers.map((p) => [p._id.toString(), p]));
-        topThree = ranked
-          .map(([pid, points], i) => {
-            const p = playerById.get(pid);
-            if (!p) return null; // account since deleted - skip rather than show a blank row
-            return {
-              rank: i + 1, name: p.name, username: p.username, avatarId: p.avatarId, avatarVariantId: avatarVariantForPlayerDoc(p), hasPlayPass: hasPlayPassForPlayerDoc(p),
-              hasLegionBadge: !!p.hasLegionBadge, points,
-              nearWon: financialsByPlayer.has(pid) ? financialsByPlayer.get(pid) : null,
-            };
-          })
-          .filter(Boolean);
+        topThree = ranked.map(([pid, e], i) => {
+          const p = playerById.get(pid);
+          if (!p) return null;
+          return {
+            rank: i + 1, name: p.name, username: p.username, avatarId: p.avatarId, avatarVariantId: avatarVariantForPlayerDoc(p), hasPlayPass: hasPlayPassForPlayerDoc(p),
+            hasLegionBadge: !!p.hasLegionBadge, points: e.points, nearWon: e.nearWon, isMe: pid === String(me._id),
+          };
+        }).filter(Boolean);
       }
+
+      const matches = records.map((r) => ({
+        matchId: r.matchId || null,
+        at: r.earnedAt,
+        role: r.role, won: r.won, points: r.points,
+        rawPoints: r.rawPoints || r.points,
+        reduced: !!r.reduced,
+        bonusMissionPoints: r.bonusMissionPoints || 0,
+        bonusMissionDone: !!r.bonusMissionDone,
+        missionsDone: r.missionsDone || 0, killsCount: r.killsCount || 0,
+        meetingsSurvivedCount: r.meetingsSurvivedCount || 0, sabotageActionsCount: r.sabotageActionsCount || 0,
+        ventUsesCount: r.ventUsesCount || 0, survived: !!r.survived,
+        saboteur: tokenInfo(tokenByMatch.get(r.matchId)),
+      }));
+      const wins = matches.filter((m) => m.won).length;
 
       games.push({
         id: groupKey,
         displayName,
+        roomCode: last.roomCode || null,
+        mode, // 'free' | 'pool' | 'paid' | 'sponsor'
         isPaid,
-        earnedAtUtc: first.earnedAt,
+        // [ACTIVITY FIX] Was the FIRST match's time while the list was
+        // sorted by the LAST one - a game that ran past midnight landed
+        // under the wrong day and could repeat a day header. Now both
+        // sorting and grouping use the last match; the start is separate.
+        earnedAtUtc: last.earnedAt,
+        startedAt: first.earnedAt,
+        endedAt: last.earnedAt,
+        totals: {
+          matches: matches.length, wins, losses: matches.length - wins,
+          points: matches.reduce((a, m) => a + (m.points || 0), 0),
+          saboteur: matches.reduce((a, m) => a + (m.saboteur ? m.saboteur.amount : 0), 0),
+          kills: matches.reduce((a, m) => a + m.killsCount, 0),
+          missions: matches.reduce((a, m) => a + m.missionsDone, 0),
+        },
         entryFeeNear,
         poolNearWon,
+        myPoolRank: myRankRec ? myRankRec.poolRank : null,
         topThree,
-        matches: records.map((r) => ({
-          role: r.role, won: r.won, points: r.points,
-          // [BUG FIX - POINTS "COMPLETELY DIFFERENT" FROM IN-GAME, BONUS
-          // MISSION POINTS INVISIBLE] Both now exposed so the frontend
-          // can show the full, honest picture instead of one opaque
-          // number.
-          rawPoints: r.rawPoints || r.points, // older records: no separate raw value ever existed, so points IS the full story
-          reduced: !!r.reduced,
-          bonusMissionPoints: r.bonusMissionPoints || 0,
-          bonusMissionDone: !!r.bonusMissionDone,
-          missionsDone: r.missionsDone, killsCount: r.killsCount,
-          meetingsSurvivedCount: r.meetingsSurvivedCount, sabotageActionsCount: r.sabotageActionsCount,
-          ventUsesCount: r.ventUsesCount, survived: r.survived,
-        })),
+        matches,
       });
     }
 
+    // [ACTIVITY FIX] The old summary mixed things up: "Played" counted
+    // matches while the list below counted games, and "Points" was the
+    // all-time total while Home shows this week's. Every number is now
+    // explicitly named.
+    const weekStart = getCurrentWeekStartUTC();
+    const weekValid = me.seasonWeekStart && me.seasonWeekStart.getTime() >= weekStart.getTime();
+    let saboteurEarned = 0;
+    try {
+      const agg = await economy.TokenLedger.aggregate([
+        { $match: { holderType: "player", holderId: String(me._id), status: "sent" } },
+        { $group: { _id: null, sum: { $sum: "$amount" } } },
+      ]);
+      saboteurEarned = agg[0] ? agg[0].sum : 0;
+    } catch (_) {}
+    const matchesPlayed = me.gamesPlayed || 0;
+    const matchesWon = me.gamesWon || 0;
+
     res.json({
       games,
-      summary: { totalPoints: me.totalPoints || 0, gamesPlayed: me.gamesPlayed || 0, gamesWon: me.gamesWon || 0 },
+      summary: {
+        totalPoints: me.totalPoints || 0,
+        weekPoints: weekValid ? (me.currentSeasonPoints || 0) : 0,
+        matchesPlayed, matchesWon,
+        winRate: matchesPlayed > 0 ? Math.round((matchesWon / matchesPlayed) * 100) : 0,
+        saboteurEarned,
+        // old names kept so an older frontend build keeps working
+        gamesPlayed: matchesPlayed, gamesWon: matchesWon,
+      },
     });
   } catch (err) {
     console.error("[ACTIVITY] /activity/games error:", err.message);
@@ -7096,6 +7141,9 @@ async function commitPendingPoints(meta) {
         entryFeeNear: typeof meta.entryFeeNear === "number" ? meta.entryFeeNear : null,
         poolNearWon: typeof meta.poolNearWon === "number" ? meta.poolNearWon : null,
         poolRank: typeof meta.poolRank === "number" ? meta.poolRank : null,
+        // [ACTIVITY FIX] gameMode was passed in but never saved, so Activity
+        // couldn't tell a host-funded Pool game from an entry-fee Paid game.
+        gameMode: meta.gameMode || null,
       });
     } catch (e2) {
       console.error("[POINTS] MatchRecord.create failed:", e2.message);
