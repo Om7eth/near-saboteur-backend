@@ -9117,6 +9117,7 @@ io.on("connection", (socket) => {
       finalAvatarId = allAvatarIds.find((id) => !takenAvatarIds.has(id)) || avatarId;
     }
     room.players[socket.id] = { name, avatarId: finalAvatarId, isHost: false, playerToken, accountId: account?.accountId || null, accountEmail: account?.accountEmail || null, accountUsername: account?.accountUsername || null, hasLegionBadge: !!account?.hasLegionBadge, hasPlayPass: !!account?.hasPlayPass, premiumVariantId: account?.activePremiumAvatarVariant || null, avatarVariantId: resolveAvatarVariantForRoom(account, finalAvatarId) };
+    bots.resolveNameClash(room); // [$SABOTEUR] a person's name wins over a bot's
     // [HOST RETURNS TO CREATOR] If this is the account that originally
     // created the room rejoining after having left, they get host power
     // back immediately - even if someone else was hosting in the
@@ -9329,6 +9330,7 @@ io.on("connection", (socket) => {
       hasPlayPass: !!reqRec.hasPlayPass, premiumVariantId: reqRec.activePremiumAvatarVariant || null,
       avatarVariantId: resolveAvatarVariantForRoom({ hasPlayPass: reqRec.hasPlayPass, activePremiumAvatarVariant: reqRec.activePremiumAvatarVariant }, finalAvatarId),
     };
+    bots.resolveNameClash(room); // [$SABOTEUR] a person's name wins over a bot's
     restoreHostToCreatorIfPresent(room);
     cancelRoomEmptyClose(room.code);
     requesterSocket.join(roomCode);
@@ -9996,6 +9998,7 @@ io.on("connection", (socket) => {
 
     if (typeof name === "string" && name.trim()) {
       room.players[socket.id].name = name.trim();
+      bots.resolveNameClash(room); // [$SABOTEUR] a person's name wins over a bot's
     }
     // [BUG FIX] createRoom/joinRoom both explicitly avoid handing out an
     // avatarId someone else in the room already has - this handler (used

@@ -45,7 +45,10 @@ const KILL_PAUSE_MS = 2500; // matches KILL_CUTSCENE_MS in game.jsx
 // result (see votingResult in game.jsx). Bots copy that.
 const POST_MEETING_RESPAWN_MS = 4000;
 
-const BOT_NAMES = ["Nova", "Atlas", "Orbit", "Pixel", "Echo", "Comet", "Byte", "Zephyr", "Quark", "Rune", "Vega", "Flux"];
+// [$SABOTEUR] One fixed persona (and one fixed testnet wallet,
+// bot-<name>.saboteur.testnet) per name - reused in every room. Names come
+// from the NEAR ecosystem and the game itself (Ironclaw = our premium skin).
+const BOT_NAMES = ["Shard", "Epoch", "Yocto", "Nonce", "Relay", "Intent", "Beacon", "Cipher", "Glitch", "Sentry", "Decoy", "Vector", "Ironclaw"];
 const ALL_AVATAR_IDS = ["purple", "green", "red", "black", "darkgreen", "magenta", "yellow", "brown", "orange", "cyan"];
 
 let ctx = null; // { io, rooms }
@@ -138,14 +141,33 @@ function lockedGatesFor(room) {
 // ---------------------------------------------------------------------
 // Add / remove
 // ---------------------------------------------------------------------
+// A person's name always wins: if someone in the Lobby has (or just took)
+// the same name as a bot, that bot quietly switches to a free name, so
+// "@Shard" never means two players. Lobby only - nobody can join mid-game.
+// Returns [{ id, from, to }] for every bot that was renamed.
+function resolveNameClash(room) {
+  if (!room || room.gameStarted) return [];
+  const humanNames = new Set(Object.values(room.players).filter((p) => !p.isBot).map((p) => String(p.name || "").trim().toLowerCase()));
+  const changed = [];
+  for (const [id, p] of Object.entries(room.players)) {
+    if (!p.isBot || !humanNames.has(String(p.name).toLowerCase())) continue;
+    const taken = new Set(Object.values(room.players).map((q) => String(q.name || "").trim().toLowerCase()));
+    const free = BOT_NAMES.filter((n) => !taken.has(n.toLowerCase()));
+    const to = free.length ? pick(free) : `Bot${crypto.randomInt(10, 100)}`;
+    changed.push({ id, from: p.name, to });
+    p.name = to;
+  }
+  return changed;
+}
+
 function addBot(room) {
   if (!room) return { ok: false, error: "Room not found." };
   if (room.pool) return { ok: false, error: "Bots are only allowed in Free Play rooms." };
   if (room.gameStarted) return { ok: false, error: "Bots can only be added in the Lobby." };
   if (Object.keys(room.players).length >= MAX_PLAYERS) return { ok: false, error: "Room is full." };
 
-  const takenNames = new Set(Object.values(room.players).map((p) => p.name));
-  const freeNames = BOT_NAMES.filter((n) => !takenNames.has(n));
+  const takenNames = new Set(Object.values(room.players).map((p) => String(p.name || "").trim().toLowerCase()));
+  const freeNames = BOT_NAMES.filter((n) => !takenNames.has(n.toLowerCase()));
   const name = freeNames.length ? pick(freeNames) : `Bot${crypto.randomInt(10, 100)}`;
 
   const takenAvatars = new Set(Object.values(room.players).map((p) => p.avatarId));
@@ -800,6 +822,8 @@ function init({ io, rooms }) {
 }
 
 module.exports = {
+  resolveNameClash,
+  BOT_NAMES,
   MAP_VERSION,
   init,
   setHooks,
