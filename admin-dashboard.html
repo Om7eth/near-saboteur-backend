@@ -143,6 +143,7 @@
     <button class="tab-btn" data-tab="funds">Funds<span id="fundsDot" class="dot" style="display:none;"></span></button>
     <button class="tab-btn" data-tab="transactions">Transactions</button>
     <button class="tab-btn" data-tab="revenue">Revenue</button>
+    <button class="tab-btn" data-tab="saboteur">$SABOTEUR</button>
     <button class="tab-btn" data-tab="rooms">Rooms</button>
     <button class="tab-btn" data-tab="players">Players</button>
     <button class="tab-btn" data-tab="playpass">Play Pass</button>
@@ -232,6 +233,11 @@
     <!-- ===================== REVENUE ===================== -->
     <div class="panel" id="panel-revenue">
       <div id="revenueWrap"><div class="empty-note">Loading…</div></div>
+    </div>
+
+    <!-- ===================== $SABOTEUR (testnet token) ===================== -->
+    <div class="panel" id="panel-saboteur">
+      <div id="saboteurWrap"><div class="empty-note">Loading…</div></div>
     </div>
 
     <!-- ===================== ROOMS ===================== -->
@@ -494,6 +500,7 @@
       if (btn.dataset.tab === 'funds') loadFunds();
       if (btn.dataset.tab === 'transactions') loadTransactions();
       if (btn.dataset.tab === 'revenue') loadRevenue();
+      if (btn.dataset.tab === 'saboteur') loadSaboteur();
       if (btn.dataset.tab === 'rooms') { document.getElementById('roomDetailView').style.display = 'none'; document.getElementById('roomsListView').style.display = 'block'; loadRooms(); }
       if (btn.dataset.tab === 'players') { document.getElementById('playerDetailView').style.display = 'none'; document.getElementById('playersListView').style.display = 'block'; loadPlayers(); }
       if (btn.dataset.tab === 'playpass') loadPlayPass();
@@ -932,6 +939,40 @@
   };
 
   // ---------- Revenue ----------
+  // [$SABOTEUR] testnet token: totals, treasury, top earners, farm flags, rules
+  async function loadSaboteur() {
+    const wrap = document.getElementById('saboteurWrap');
+    try {
+      const d = await apiFetch('/admin/saboteur');
+      const fmt = (n) => (Math.round((Number(n) || 0) * 100) / 100).toLocaleString();
+      const sum = (pred) => (d.totals || []).filter(pred).reduce((s, t) => s + t.amount, 0);
+      const paidPlayers = sum((t) => t._id.t === 'player' && t._id.s === 'sent');
+      const paidBots = sum((t) => t._id.t === 'bot' && t._id.s === 'sent');
+      const waiting = sum((t) => t._id.s === 'pending' || t._id.s === 'failed');
+      const tok = d.token ? `https://testnet.nearblocks.io/token/${esc(d.token)}` : '';
+      wrap.innerHTML = `
+        <div class="stat-grid" style="margin-bottom:10px;">
+          <div class="stat-card"><div class="num">${d.treasuryBalance == null ? '—' : fmt(d.treasuryBalance)}</div><div class="label">TREASURY (OF 1,000,000,000)</div></div>
+          <div class="stat-card"><div class="num">${fmt(paidPlayers)}</div><div class="label">PAID TO PLAYERS</div></div>
+          <div class="stat-card"><div class="num">${fmt(paidBots)}</div><div class="label">PAID TO BOTS (BOT TREASURY)</div></div>
+          <div class="stat-card"><div class="num">${fmt(waiting)}</div><div class="label">WAITING / RETRYING</div></div>
+        </div>
+        <div class="card"><h3 style="color:#ffd75e;">Token</h3>
+          <p style="font-size:12px;margin:0;">${tok ? `<a href="${tok}" target="_blank" rel="noopener">${esc(d.token)}</a>` : 'Not configured'} · treasury ${esc(d.treasury || '—')} · testnet, no real value</p>
+          <p style="font-size:11px;color:#6a7570;margin:6px 0 0;">Last 24h: ${(d.last24 || []).map((x) => `${esc(x.holderType)} ${fmt(x.amount)} over ${x.matches} matches`).join(' · ') || 'nothing yet'}</p>
+        </div>
+        <div class="card"><h3 style="color:#ff8a8a;">Farm flags (last 24h)</h3>
+          ${(d.farmFlags || []).length ? `<table><tr><th>Player</th><th>Matches</th><th>Top-3</th><th>Solo with bots</th></tr>${d.farmFlags.map((f) => `<tr><td>${esc(f.name || f._id)}</td><td>${f.matches}</td><td>${f.top3}</td><td>${f.solo}</td></tr>`).join('')}</table>` : '<p style="font-size:12px;color:#6a7570;margin:0;">Nobody flagged. (Flag = 8+ top-3 finishes or 15+ solo-with-bots matches in 24h.)</p>'}
+        </div>
+        <div class="card"><h3>Top earners</h3>
+          ${(d.topPlayers || []).length ? `<table><tr><th>Player</th><th>Matches</th><th>Earned</th></tr>${d.topPlayers.map((t) => `<tr><td>${esc(t.name || t._id)}</td><td>${t.matches}</td><td>${fmt(t.earned)}</td></tr>`).join('')}</table>` : '<p style="font-size:12px;color:#6a7570;margin:0;">No rewards yet.</p>'}
+        </div>
+        <div class="card"><h3>Current rules (economy/rules.js)</h3>
+          <pre style="font-size:11px;white-space:pre-wrap;margin:0;color:#cfd2da;">${esc(JSON.stringify(d.rules, null, 2))}</pre>
+        </div>`;
+    } catch (e) { wrap.innerHTML = `<div class="empty-note">Couldn't load: ${esc(e.message || '')}</div>`; }
+  }
+
   async function loadRevenue() {
     try {
       const d = await apiFetch('/admin/revenue');
