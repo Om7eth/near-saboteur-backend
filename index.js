@@ -89,6 +89,9 @@ const rooms = {};
 // [AI BOTS - NEAR HACKATHON] Server-side bot players (Free Play only).
 // All bot logic lives in ./bots - see bots/botManager.js for the rules.
 const bots = require("./bots/botManager");
+// [$SABOTEUR] testnet token economy - rules in economy/rules.js
+const economy = require("./economy/match");
+const saboteurToken = require("./economy/saboteurToken");
 bots.init({ io, rooms });
 
 // ============================================================
@@ -111,6 +114,8 @@ if (MONGODB_URI) {
     .connect(MONGODB_URI)
     .then(() => {
       console.log("[DB] Connected to MongoDB");
+      economy.startRetryLoop(); // [$SABOTEUR] retry payouts that failed (chain hiccups)
+      console.log(saboteurToken.configured() ? `[SABOTEUR] token ${saboteurToken.TOKEN} (testnet), treasury ${saboteurToken.TREASURY}` : "[SABOTEUR] not configured (set SABOTEUR_PARENT_ACCOUNT_ID / SABOTEUR_PARENT_PRIVATE_KEY) - rewards are recorded but not paid");
       fixLegacyPlayerIndexes();
     })
     .catch((err) => console.error("[DB] MongoDB connection error:", err.message));
@@ -4431,6 +4436,26 @@ app.get("/activity/games", async (req, res) => {
 // is the only source for "what's happening right now" (a match in
 // progress has no MatchRecord yet; that only gets written once a player
 // actually returns to the Lobby afterward).
+// ---- [$SABOTEUR] token economy reads ----
+// Player: own balance + per-match history (wallet screen).
+app.get("/saboteur/me", async (req, res) => {
+  try {
+    const account = await resolveAccountFromToken(req.query.sessionToken);
+    if (!account) return res.status(401).json({ message: "Sign in to see your $SABOTEUR." });
+    res.json(await economy.playerSummary(account.accountId));
+  } catch (e) { res.status(500).json({ message: "Couldn't load $SABOTEUR right now." }); }
+});
+// Public: every bot's wallet and track record (for players and judges).
+app.get("/saboteur/bots", async (req, res) => {
+  try { res.json(await economy.botsSummary(bots.BOT_NAMES)); }
+  catch (e) { res.status(500).json({ message: "Couldn't load bot wallets right now." }); }
+});
+// Admin: totals, top earners, farm flags, current rules.
+app.get("/admin/saboteur", requireAdmin, async (req, res) => {
+  try { res.json(await economy.adminSummary()); }
+  catch (e) { res.status(500).json({ message: e.message }); }
+});
+
 app.get("/admin/live-rooms", requireAdmin, (req, res) => {
   const list = Object.values(rooms).map((r) => ({
     code: r.code,
@@ -6762,9 +6787,10 @@ function computeMatchPoints(player, winner) {
 // everyone, so waiting until then to compute results would silently
 // give every later returner a wrong (or missing) answer.
 function stagePendingPointsForRoom(room) {
-  Object.values(room.players).forEach((p) => {
+  Object.entries(room.players).forEach(([pid, p]) => {
     if (!p.accountId) { p.pendingPoints = 0; return; } // guest - never staged, never committed
-    p.pendingPoints = computeMatchPoints(p, room.winner);
+    // [$SABOTEUR] + backed-vote results (right +5 / wrong -5), never below 0
+    p.pendingPoints = Math.max(0, computeMatchPoints(p, room.winner) + economy.backDelta(room, pid));
     p.pendingWon = p.role === room.winner;
     // [POOL GAMES] This is now the DEFINITIVE running total for this
     // pool - there's no separate on-chain leaderboard anymore (see the
@@ -7431,6 +7457,7 @@ function checkWinCondition(roomCode, force = false) {
   if (aliveCrewmates.length < 2 && aliveSaboteurs.length > 0) {
     room.winner = "saboteur";
     stagePendingPointsForRoom(room); // [POINTS SYSTEM STEP 2] must happen now, before gameOver - see the comment on stagePendingPointsForRoom
+    economy.settleMatch({ io, roomCode, room, computePoints: computeMatchPoints, hasDb: !!MONGODB_URI }); // [$SABOTEUR] rank rewards
     io.to(roomCode).emit("gameOver", { winner: "saboteur", reason: "elimination", saboteurReveal: buildSaboteurReveal(room) });
     console.log(`Room ${roomCode}: Saboteur(s) win by elimination`);
     return true;
@@ -7450,6 +7477,7 @@ function checkWinCondition(roomCode, force = false) {
   if (room.gameStarted && aliveSaboteurs.length === 0) {
     room.winner = "crewmate";
     stagePendingPointsForRoom(room); // [POINTS SYSTEM STEP 2]
+    economy.settleMatch({ io, roomCode, room, computePoints: computeMatchPoints, hasDb: !!MONGODB_URI }); // [$SABOTEUR] rank rewards
     io.to(roomCode).emit("gameOver", { winner: "crewmate", reason: "saboteurEjected", saboteurReveal: buildSaboteurReveal(room) });
     console.log(`Room ${roomCode}: Crewmates win - Saboteur ejected`);
     return true;
@@ -7485,6 +7513,7 @@ function checkWinCondition(roomCode, force = false) {
   if ((allCrewmates.length > 0 || departedCrewmates.length > 0) && everyoneDone) {
     room.winner = "crewmate";
     stagePendingPointsForRoom(room); // [POINTS SYSTEM STEP 2]
+    economy.settleMatch({ io, roomCode, room, computePoints: computeMatchPoints, hasDb: !!MONGODB_URI }); // [$SABOTEUR] rank rewards
     io.to(roomCode).emit("gameOver", { winner: "crewmate", reason: "missionsComplete", saboteurReveal: buildSaboteurReveal(room) });
     console.log(`Room ${roomCode}: Crewmates win - all missions complete`);
     return true;
@@ -8260,7 +8289,7 @@ function voteSkipDiscussion(roomCode, voterId) {
 
 // [AI BOTS] Extracted from castVote so bots vote under the same rules.
 // Returns null on success or { message } on error.
-function castMeetingVote(roomCode, voterId, targetId) {
+function castMeetingVote(roomCode, voterId, targetId, back = false) {
   const room = rooms[roomCode];
   if (!room || !room.meeting) return;
 
@@ -8300,6 +8329,8 @@ function castMeetingVote(roomCode, voterId, targetId) {
     return { message: "That target is no longer valid." };
   }
   room.meeting.votes[voterId] = choice;
+  // [$SABOTEUR] Optional "back your vote": settled in match points at the end.
+  const backed = !!back && economy.recordBack(room, voterId, choice);
 
   const totalAlive = getActiveAliveCount(room);
   const totalVotes = Object.keys(room.meeting.votes).length;
@@ -8316,8 +8347,8 @@ function castMeetingVote(roomCode, voterId, targetId) {
   // real time.
   // Live votes stay visible on purpose (Om7eth's call): every screen shows
   // the voter's small avatar under whoever they voted for, as it happens.
-  io.to(roomCode).emit("voteUpdate", { totalVotes, totalAlive, voterId: voterId, voterName: voter.name, choice });
-  pushMatchChat(room, { kind: "sys", text: `${voter.name} voted`, voterId, timestamp: Date.now() });
+  io.to(roomCode).emit("voteUpdate", { totalVotes, totalAlive, voterId: voterId, voterName: voter.name, choice, backed });
+  pushMatchChat(room, { kind: "sys", text: `${voter.name} voted${backed ? " · backed it" : ""}`, voterId, timestamp: Date.now() });
 
   console.log(`${voter.name} voted in room ${roomCode} (${totalVotes}/${totalAlive})`);
 
@@ -10154,7 +10185,7 @@ io.on("connection", (socket) => {
     delete room.activeSabotageType;
     delete room.departedCrewmateMissions;
     delete room.ghostChat; // [BUG FIX] Clear ghost chat between games
-    delete room.matchChat; delete room.meetingNo; // [CHAT REDESIGN] new match, fresh meeting chat
+    delete room.matchChat; delete room.meetingNo; delete room.backVotes; // [CHAT REDESIGN] new match, fresh meeting chat (+ backed votes)
 
     // [BUG FIX] A player who disconnected mid-game (see the disconnect
     // handler's grace period) but hadn't yet had their grace period
@@ -10284,7 +10315,7 @@ io.on("connection", (socket) => {
     delete room.activeSabotageType;
     delete room.departedCrewmateMissions;
     delete room.ghostChat; // [BUG FIX] Clear ghost chat between games
-    delete room.matchChat; delete room.meetingNo; // [CHAT REDESIGN] new match, fresh meeting chat
+    delete room.matchChat; delete room.meetingNo; delete room.backVotes; // [CHAT REDESIGN] new match, fresh meeting chat (+ backed votes)
 
     // [NEW FEATURE] Public room is joinable again - reuses the same
     // Telegram message (no spam). Fire-and-forget.
@@ -10522,7 +10553,7 @@ io.on("connection", (socket) => {
     // disconnect-grace flag) even if some reset path didn't run first.
     delete room.meeting;
     delete room.ghostChat;
-    delete room.matchChat; delete room.meetingNo; // [CHAT REDESIGN]
+    delete room.matchChat; delete room.meetingNo; delete room.backVotes; // [CHAT REDESIGN]
     delete room.activeGateLock;
     delete room.activeSabotageType;
     delete room.departedCrewmateMissions;
@@ -11356,8 +11387,8 @@ io.on("connection", (socket) => {
   // Client sends: { targetId } - a null/undefined targetId means a "skip" vote
   // [MULTIPLAYER: SHARED] - the server is what keeps the vote count and
   // decides the result, so no client can fake an outcome.
-  socket.on("castVote", ({ targetId }) => {
-    const err = castMeetingVote(socket.data.roomCode, socket.id, targetId);
+  socket.on("castVote", ({ targetId, back }) => {
+    const err = castMeetingVote(socket.data.roomCode, socket.id, targetId, !!back);
     if (err) socket.emit("voteError", err);
   });
 

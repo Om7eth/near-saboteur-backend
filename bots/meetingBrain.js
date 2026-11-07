@@ -32,6 +32,7 @@
 // ============================================================
 const B = require("./brain");
 const FC = require("./fallbackChat");
+const { RULES: ECON_RULES } = require("../economy/rules");
 
 const API_KEY = process.env.NEAR_AI_API_KEY || "";
 const MODEL = process.env.NEAR_AI_MODEL || "Qwen/Qwen3.6-35B-A3B-FP8";
@@ -386,6 +387,18 @@ const ASK_WHY_RX = /(\bwhy\b|\bkyu|\bkyun|क्यों).*(\bcall|\bmeet|\bem\
 const NEGATED_SUS_RX = /\b(no|not|nobody|no one|noone|nothing|koi nahi|kisi pe nahi)\b[^.?!]{0,14}\b(sus|suspect|suspicious|kill|kills|killed|shak)/i;
 const ACCUSE_RX = /\b(sus|suspect|suspicious|kill|killed|killer|killing|vanish(ed)?|lying|liar|lied|fake|faking|faked|impostor|saboteur|sabo|vote (?!skip)\w+)\b|shak|jhooth|jhoota|maara|संदिग्ध|झूठ/i;
 
+// [$SABOTEUR] Back the vote only with real evidence from memory: saw the
+// target kill, or saw them right where a body was found shortly before.
+// A saboteur bot sometimes backs its scapegoat to look sure of itself.
+function shouldBack(room, botId, targetId, memory) {
+  const me = room.players[botId], t = room.players[targetId];
+  if (!me || !t) return false;
+  if (me.role === "saboteur") return chance(ECON_RULES.saboteurBotBluffChance);
+  const mem = memory || [];
+  if (mem.some((m) => m.kind === "kill" && m.name === t.name)) return true;
+  return mem.some((b) => b.kind === "body" && mem.some((m) => m.kind === "saw" && m.name === t.name && m.where === b.where && m.t <= b.t && b.t - m.t < 45000));
+}
+
 // Called every bot tick while room.meeting exists.
 function tick(roomCode, room, now, api) {
   const meeting = room.meeting;
@@ -500,7 +513,7 @@ function tick(roomCode, room, now, api) {
       }
       bs.voted = true;
       const target = bs.vote !== "skip" && room.players[bs.vote] && room.players[bs.vote].alive !== false ? bs.vote : "skip";
-      api.castMeetingVote(roomCode, id, target);
+      api.castMeetingVote(roomCode, id, target, target !== "skip" && shouldBack(room, id, target, api.memoryOf(id)));
     }
   }
 }
