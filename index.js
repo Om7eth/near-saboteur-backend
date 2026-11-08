@@ -1610,6 +1610,18 @@ function cleanSplit(arr) {
   while (s.length && s[s.length - 1] === 0) s.pop();
   return s.length && s.reduce((a, b) => a + b, 0) === 100 ? s : null;
 }
+// Prize wallets live OUTSIDE room.pool on purpose: room.pool is broadcast to
+// every player (poolUpdated / roomJoined), and only the host may see these.
+const poolWalletsById = new Map();
+function poolWallets(pool) {
+  if (!pool) return {};
+  if (!poolWalletsById.has(pool.poolId)) poolWalletsById.set(pool.poolId, {});
+  return poolWalletsById.get(pool.poolId);
+}
+function setPoolWallet(pool, accountId, wallet) {
+  poolWallets(pool)[accountId] = wallet;
+  pool.walletHolders = Object.keys(poolWallets(pool)); // ids only - who still needs to add one
+}
 function saveManualPool(pool, update) {
   if (!MONGODB_URI || !pool || pool.mode !== "manual") return;
   ManualPool.updateOne({ poolId: pool.poolId }, { $set: update }, { upsert: true }).catch((e) => console.error("[MANUAL POOL] save failed:", e.message));
@@ -1617,7 +1629,7 @@ function saveManualPool(pool, update) {
 function manualPoolPlayers(room) {
   return Object.values(room.players)
     .filter((p) => p.accountId && !p.isBot && !p.spectator)
-    .map((p) => ({ accountId: p.accountId, name: p.name, username: p.accountUsername || null, wallet: (room.pool.wallets || {})[p.accountId] || null }));
+    .map((p) => ({ accountId: p.accountId, name: p.name, username: p.accountUsername || null, wallet: poolWallets(room.pool)[p.accountId] || null }));
 }
 // Ranks every non-spectator participant by total pool points and pays the
 // host's split down the list - called instead of the on-chain payout.
@@ -1634,7 +1646,7 @@ async function settleManualPool(room, roomCode) {
     return {
       rank: i + 1, accountId, points,
       name: pl?.name || "Player", username: pl?.username || null,
-      wallet: (pool.wallets || {})[accountId] || pl?.payoutWallet || null,
+      wallet: poolWallets(pool)[accountId] || pl?.payoutWallet || null,
       amountNear: Math.round(pool.prizeNear * (pool.split[i] / 100) * 1000) / 1000,
       paidAt: null,
     };
@@ -3688,7 +3700,7 @@ app.post("/pools/payout-wallet", async (req, res) => {
     const activeCode = findActiveRoomForAccount(account.accountId);
     const room = activeCode ? rooms[activeCode] : null;
     if (room && room.pool && room.pool.mode === "manual") {
-      room.pool.wallets[account.accountId] = w;
+      setPoolWallet(room.pool, account.accountId, w);
       saveManualPool(room.pool, { players: manualPoolPlayers(room) });
       io.to(room.code).emit("poolUpdated", { pool: room.pool });
     }
@@ -3795,6 +3807,16 @@ app.get("/rooms/check/:code", async (req, res) => {
           entryFeeNear: room.pool.entryFeeNear || 0,
           hostFunded: !!room.pool.hostFunded,
           alreadyParticipant,
+          // [POOL v2]
+          roomCode,
+          payout: room.pool.mode === "manual" ? "manual" : "auto",
+          prizeNear: room.pool.mode === "manual" ? room.pool.prizeNear : room.pool.entryFeeNear,
+          split: room.pool.mode === "manual" ? room.pool.split : [50, 30, 20],
+          maxMatches: room.pool.maxMatches,
+          hostRole: room.pool.hostRole || "play",
+          isPublic: !!room.isPublic,
+          seats: Object.values(room.players).filter((p) => !p.spectator).length,
+          poolHostName: (Object.values(room.players).find((p) => p.accountId === room.pool.hostAccountId) || {}).name || null,
         }
       : null,
   });
@@ -3835,17 +3857,27 @@ app.get("/pools/live", async (req, res) => {
       playerCount: Object.keys(r.players).length,
       gameStarted: !!r.gameStarted,
       isHost: accountId ? r.pool.hostAccountId === accountId : false,
+      // [POOL v2]
+      roomCode: r.code,
+      payout: r.pool.mode === "manual" ? "manual" : "auto",
+      prizeNear: r.pool.mode === "manual" ? r.pool.prizeNear : r.pool.entryFeeNear,
+      split: r.pool.mode === "manual" ? r.pool.split : [50, 30, 20],
+      hostRole: r.pool.hostRole || "play",
+      isPublic: !!r.isPublic,
+      seats: Object.values(r.players).filter((p) => !p.spectator).length,
+      poolHostName: (Object.values(r.players).find((p) => p.accountId === r.pool.hostAccountId) || {}).name || null,
+      poolHostUsername: (Object.values(r.players).find((p) => p.accountId === r.pool.hostAccountId) || {}).accountUsername || null,
     });
 
     const allPoolRooms = Object.values(rooms).filter((r) => r.pool);
 
     const myPools = accountId
-      ? allPoolRooms.filter((r) => r.pool.participantAccountIds.includes(accountId)).map(summarize)
+      ? allPoolRooms.filter((r) => r.pool.participantAccountIds.includes(accountId) || r.pool.hostAccountId === accountId).map(summarize)
       : [];
 
     const publicPools = allPoolRooms
       .filter((r) => r.isPublic && r.pool.state === "Open")
-      .filter((r) => !accountId || !r.pool.participantAccountIds.includes(accountId))
+      .filter((r) => !accountId || (!r.pool.participantAccountIds.includes(accountId) && r.pool.hostAccountId !== accountId))
       .map(summarize);
 
     res.json({ myPools, publicPools });
@@ -8844,7 +8876,7 @@ io.on("connection", (socket) => {
         onChainParticipantAccountIds: [],
         leaderboard: {},
         confirmedAccountIds: [],
-        wallets: {},
+        walletHolders: [],
       };
     }
     // [POOL v2] Host decides once, at creation: play, watch, or just host.
@@ -8852,7 +8884,7 @@ io.on("connection", (socket) => {
     if (poolSetup && poolSetup.mode === "manual" && poolSetup.hostRole === "play") {
       poolSetup.participantAccountIds.push(account.accountId);
       const w = cleanPayoutWallet(poolConfig.payoutWallet);
-      if (w) poolSetup.wallets[account.accountId] = w;
+      if (w) setPoolWallet(poolSetup, account.accountId, w);
     }
 
     let code = generateRoomCode();
@@ -9385,8 +9417,9 @@ io.on("connection", (socket) => {
       const acct = await resolveAccountFromToken(sessionToken);
       const isPoolHost = acct && acct.accountId === room.pool.hostAccountId;
       if (!acct) { const message = "Sign in to join a pool game."; socket.emit("joinError", { message }); ack({ ok: false, message }); return; }
-      if (!room.isPublic && !isPoolHost) { const message = "This is a private pool - send a join request and the host will let you in."; socket.emit("joinError", { message }); ack({ ok: false, message, needsApproval: true }); return; }
-      manualWallet = cleanPayoutWallet(payoutWallet);
+      const alreadyIn = (room.pool.participantAccountIds || []).includes(acct.accountId);
+      if (!room.isPublic && !isPoolHost && !alreadyIn) { const message = "This is a private pool - send a join request and the host will let you in."; socket.emit("joinError", { message }); ack({ ok: false, message, needsApproval: true }); return; }
+      manualWallet = cleanPayoutWallet(payoutWallet) || poolWallets(room.pool)[acct.accountId] || null;
       if (!manualWallet && !(isPoolHost && room.pool.hostRole !== "play")) { const message = "Add your .near wallet address so the host can send your prize."; socket.emit("joinError", { message }); ack({ ok: false, message, needsWallet: true }); return; }
     }
 
@@ -9473,7 +9506,7 @@ io.on("connection", (socket) => {
       if (account.accountId === room.pool.hostAccountId && room.pool.hostRole !== "play") room.players[socket.id].spectator = true;
       if (!room.players[socket.id].spectator && !room.pool.participantAccountIds.includes(account.accountId)) room.pool.participantAccountIds.push(account.accountId);
       if (manualWallet) {
-        room.pool.wallets[account.accountId] = manualWallet;
+        setPoolWallet(room.pool, account.accountId, manualWallet);
         Player.updateOne({ _id: account.accountId }, { $set: { payoutWallet: manualWallet } }).catch(() => {});
       }
       saveManualPool(room.pool, { players: manualPoolPlayers(room) });
@@ -9698,7 +9731,7 @@ io.on("connection", (socket) => {
     if (reqRec.accountId) getOrCreateRoomLeaderboardEntry(room, reqRec.accountId, reqRec.accountUsername);
     if (room.pool && room.pool.mode === "manual" && reqRec.accountId && reqRec.payoutWallet) {
       if (!room.pool.participantAccountIds.includes(reqRec.accountId)) room.pool.participantAccountIds.push(reqRec.accountId);
-      room.pool.wallets[reqRec.accountId] = reqRec.payoutWallet;
+      setPoolWallet(room.pool, reqRec.accountId, reqRec.payoutWallet);
       Player.updateOne({ _id: reqRec.accountId }, { $set: { payoutWallet: reqRec.payoutWallet } }).catch(() => {});
       saveManualPool(room.pool, { players: manualPoolPlayers(room) });
       io.to(roomCode).emit("poolUpdated", { pool: room.pool });
@@ -10753,6 +10786,15 @@ io.on("connection", (socket) => {
   // to module level (see above, near cancelPoolOnChain) so both this
   // connection's handlers AND the module-level auto-confirm-on-leave
   // timer can call the exact same ranking + on-chain payout logic.
+  // [POOL v2] Only the pool host gets the prize-wallet list.
+  socket.on("getPoolWallets", (_d, callback) => {
+    const ack = typeof callback === "function" ? callback : () => {};
+    const room = rooms[socket.data.roomCode];
+    const me = room && room.players[socket.id];
+    if (!room || !room.pool || room.pool.mode !== "manual" || !me || me.accountId !== room.pool.hostAccountId) return ack({ ok: false });
+    ack({ ok: true, players: manualPoolPlayers(room) });
+  });
+
   socket.on("confirmFinalResult", async () => {
     const roomCode = socket.data.roomCode;
     const room = rooms[roomCode];
