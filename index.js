@@ -1599,10 +1599,12 @@ const manualPoolSchema = new mongoose.Schema({
 manualPoolSchema.index({ "players.accountId": 1 });
 const ManualPool = mongoose.model("ManualPool", manualPoolSchema);
 
-const NEAR_MAINNET_ADDR = /^(([a-z\d]+[-_])*[a-z\d]+\.)*([a-z\d]+[-_])*[a-z\d]+\.near$|^[0-9a-f]{64}$/;
+const NEAR_ACCOUNT_ID = /^(([a-z\d]+[-_])*[a-z\d]+\.)*([a-z\d]+[-_])*[a-z\d]+$/;
+// Any mainnet NEAR account (name.near, name.tg from HOT wallet, 64-hex implicit, 0x… eth-implicit) - never a .testnet one.
 function cleanPayoutWallet(w) {
   const v = String(w || "").trim().toLowerCase();
-  return v.length >= 2 && v.length <= 64 && NEAR_MAINNET_ADDR.test(v) ? v : null;
+  if (v.length < 2 || v.length > 64 || !NEAR_ACCOUNT_ID.test(v) || v.endsWith(".testnet")) return null;
+  return v.includes(".") || /^[0-9a-f]{64}$/.test(v) || /^0x[0-9a-f]{40}$/.test(v) ? v : null;
 }
 function cleanSplit(arr) {
   if (!Array.isArray(arr)) return null;
@@ -3695,7 +3697,7 @@ app.post("/pools/payout-wallet", async (req, res) => {
     const account = await resolveAccountFromToken(req.body && req.body.sessionToken);
     if (!account) return res.status(401).json({ message: "Sign in again." });
     const w = cleanPayoutWallet(req.body.wallet);
-    if (!w) return res.status(400).json({ message: "That doesn't look like a .near address." });
+    if (!w) return res.status(400).json({ message: "That doesn't look like a mainnet NEAR address (name.near, name.tg …)." });
     await Player.updateOne({ _id: account.accountId }, { $set: { payoutWallet: w } });
     const activeCode = findActiveRoomForAccount(account.accountId);
     const room = activeCode ? rooms[activeCode] : null;
@@ -9280,6 +9282,7 @@ io.on("connection", (socket) => {
       }
       room.players[socket.id] = {
         name, avatarId: finalAvatarId, isHost: account.accountId === room.pool.hostAccountId, playerToken,
+        spectator: account.accountId === room.pool.hostAccountId && !!room.pool.hostRole && room.pool.hostRole !== "play", // [POOL v2]
         accountId: account.accountId, accountEmail: account.accountEmail || null, accountUsername: account.accountUsername || null, hasLegionBadge: !!account.hasLegionBadge,
         hasPlayPass: !!account.hasPlayPass, premiumVariantId: account.activePremiumAvatarVariant || null,
         avatarVariantId: resolveAvatarVariantForRoom(account, finalAvatarId),
@@ -9422,7 +9425,7 @@ io.on("connection", (socket) => {
       const alreadyIn = (room.pool.participantAccountIds || []).includes(acct.accountId);
       if (!room.isPublic && !isPoolHost && !alreadyIn) { const message = "This is a private pool - send a join request and the host will let you in."; socket.emit("joinError", { message }); ack({ ok: false, message, needsApproval: true }); return; }
       manualWallet = cleanPayoutWallet(payoutWallet) || poolWallets(room.pool)[acct.accountId] || null;
-      if (!manualWallet && !(isPoolHost && room.pool.hostRole !== "play")) { const message = "Add your .near wallet address so the host can send your prize."; socket.emit("joinError", { message }); ack({ ok: false, message, needsWallet: true }); return; }
+      if (!manualWallet && !(isPoolHost && room.pool.hostRole !== "play")) { const message = "Add your mainnet NEAR wallet (like name.near or name.tg) so the host can send your prize - testnet addresses can't receive real NEAR."; socket.emit("joinError", { message }); ack({ ok: false, message, needsWallet: true }); return; }
     }
 
     // [BUG FIX] If the game has already started, reject the join
@@ -9620,7 +9623,7 @@ io.on("connection", (socket) => {
     const reqWallet = room.pool && room.pool.mode === "manual" ? cleanPayoutWallet(payoutWallet) : null;
     if (room.pool && room.pool.mode === "manual") {
       if (!account) { ack({ ok: false, message: "Sign in to join a pool game." }); return; }
-      if (!reqWallet) { ack({ ok: false, message: "Add your .near wallet address so the host can send your prize.", needsWallet: true }); return; }
+      if (!reqWallet) { ack({ ok: false, message: "Add your mainnet NEAR wallet (like name.near or name.tg) so the host can send your prize - testnet addresses can't receive real NEAR.", needsWallet: true }); return; }
     }
     const requestId = generatePlayerToken();
     const requestRecord = {
