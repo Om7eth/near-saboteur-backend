@@ -952,6 +952,18 @@ async function distributePrizesOnChain(poolId, rankedWinnerAccountIds) {
 // per-connection closure) purely so the module-level timer can reach
 // it too - it never actually referenced `socket`.
 async function distributePoolPrizes(room, roomCode) {
+  // [AUTO SETTLE] one payout only - the auto-settle timer and the older
+  // "room closing" paths can both arrive here
+  if (!room.pool || room.pool.state === "Distributed") return { success: true, already: true };
+  if (room.pool._distributing) return { success: true, inProgress: true };
+  room.pool._distributing = true;
+  try {
+    return await distributePoolPrizesOnce(room, roomCode);
+  } finally {
+    if (room.pool) room.pool._distributing = false;
+  }
+}
+async function distributePoolPrizesOnce(room, roomCode) {
   if (room.pool && room.pool.mode === "manual") return settleManualPool(room, roomCode); // [POOL v2]
   // [FUNDS SAFETY] Rank every participant with at least 1 point,
   // highest first - ties broken by whoever's leaderboard entry exists
@@ -1301,10 +1313,42 @@ async function confirmParticipant(room, roomCode, accountId) {
   }
   io.to(roomCode).emit("poolUpdated", { pool: room.pool });
 
+  // [AUTO SETTLE] confirmations are no longer required - the pool settles on
+  // its own (scheduleAutoSettle). Everyone confirming just settles it sooner.
   const allConfirmed = room.pool.participantAccountIds.every((id) => room.pool.confirmedAccountIds.includes(id));
   if (!allConfirmed) return;
 
-  await distributePoolPrizes(room, roomCode);
+  await settlePoolNow(room, "everyone confirmed");
+}
+
+// [AUTO SETTLE] Replaces "every participant must confirm the final leaderboard".
+// One AFK or confused player used to block the payout for everyone; the
+// leaderboard is computed by the server, so a confirm step proved nothing.
+const AUTO_SETTLE_DELAY_MS = 15 * 1000;
+const poolSettleTimers = {};
+function scheduleAutoSettle(room) {
+  const pool = room.pool;
+  if (!pool) return;
+  const key = pool.poolId || pool.onChainPoolId || room.code;
+  if (poolSettleTimers[key]) return;
+  pool.settlesAt = Date.now() + AUTO_SETTLE_DELAY_MS;
+  poolSettleTimers[key] = setTimeout(() => settlePoolNow(room, "timer"), AUTO_SETTLE_DELAY_MS);
+}
+async function settlePoolNow(room, why) {
+  const pool = room.pool;
+  if (!pool) return;
+  const key = pool.poolId || pool.onChainPoolId || room.code;
+  if (poolSettleTimers[key]) { clearTimeout(poolSettleTimers[key]); delete poolSettleTimers[key]; }
+  if (pool.state !== "Locked" || (pool.matchesPlayed || 0) < pool.maxMatches || pool.settling) return;
+  pool.settling = true;
+  try {
+    console.log(`[AUTO SETTLE] room ${room.code} pool ${key} settling (${why})`);
+    await distributePoolPrizes(room, room.code); // works even if the room was closed meanwhile - we hold the object
+  } catch (e) {
+    console.error(`[AUTO SETTLE] ${room.code} failed:`, e.message);
+  } finally {
+    pool.settling = false;
+  }
 }
 
 // [NEW FEATURE - AUTO-CONFIRM ON LEAVE] Per Om7eth's explicit request:
@@ -7165,6 +7209,10 @@ function stagePendingPointsForRoom(room) {
       matchesPlayed: room.pool.matchesPlayed,
       leaderboardSnapshot: room.pool.leaderboard,
     });
+    // [AUTO SETTLE] The server already counts every point, so nobody has to
+    // confirm anything any more: the pool pays out on its own a short moment
+    // after the last match (enough to see the result screen).
+    if (room.pool.matchesPlayed >= room.pool.maxMatches) scheduleAutoSettle(room);
     // [POOL GAMES] Let the room's Lobby screen show live pool progress
     // (matches played so far, current standings) without needing to
     // poll anything.
