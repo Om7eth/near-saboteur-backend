@@ -11032,11 +11032,10 @@ io.on("connection", (socket) => {
     // Hub keeps behaving exactly as it always has for them). Never
     // repeats a type already used earlier in this same room, across its
     // several matches - see pickBonusMissionType's own comment.
-    if (getRoomGameMode(room) === "pool") {
-      room.currentBonusMissionType = pickBonusMissionType(room);
-    } else {
-      delete room.currentBonusMissionType;
-    }
+    // [SAME GAME EVERYWHERE] Pool / paid matches now play exactly like Free
+    // Play - same map, missions and rules. The pool-only Legion Hub bonus
+    // mission is retired (pickBonusMissionType kept for reference).
+    delete room.currentBonusMissionType;
     // No meeting can be called within the first 30s of the game starting.
     room.meetingCooldownUntil = Date.now() + 30000;
 
