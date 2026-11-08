@@ -7945,7 +7945,7 @@ const SERVER_KILL_RANGE_PX = 22 * 2.4 * 1.6;
 function buildSaboteurReveal(room) {
   return Object.values(room.players)
     .filter((p) => p.role === "saboteur")
-    .map((p) => ({ name: p.name, avatarId: p.avatarId, avatarVariantId: p.avatarVariantId || null, hasPlayPass: !!p.hasPlayPass }));
+    .map((p) => ({ name: p.name, avatarId: p.avatarId, avatarVariantId: p.avatarVariantId || null, hasPlayPass: !!p.hasPlayPass, kills: p.killsCount || 0 }));
 }
 
 function checkWinCondition(roomCode, force = false) {
@@ -8186,6 +8186,8 @@ function finalizeVoting(roomCode) {
     eliminatedAvatarId: eliminatedId ? room.players[eliminatedId]?.avatarId : null,
     eliminatedAvatarVariantId: eliminatedId ? (room.players[eliminatedId]?.avatarVariantId || null) : null,
     eliminatedHasPlayPass: eliminatedId ? !!room.players[eliminatedId]?.hasPlayPass : false,
+    // [MATCH MOMENTS] "1 Saboteur still on board" on the ejection screen - a count only, never who
+    saboteursLeft: eliminatedId ? Object.entries(room.players).filter(([id, p]) => p.role === "saboteur" && p.alive !== false && id !== eliminatedId).length : null,
     voteCounts: counts,
     tie: topChoices.length > 1,
     clearedBodyIds,
