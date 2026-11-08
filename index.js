@@ -7447,6 +7447,7 @@ function getPlayerList(roomCode) {
     // re-checking anything itself.
     avatarVariantId: p.avatarVariantId || null,
     isHost: p.isHost,
+    spectator: !!p.spectator, // [POOL v2] watching pool host - not in the match
     // [POOL GAMES] Opaque account id (never email/username) - lets the
     // Lobby's pool-leaderboard card match room.pool.leaderboard entries
     // (keyed by accountId) back to a display name. null for guests.
@@ -8881,6 +8882,7 @@ io.on("connection", (socket) => {
     }
     // [POOL v2] Host decides once, at creation: play, watch, or just host.
     if (poolSetup) poolSetup.hostRole = ["play", "watch", "host"].includes(poolConfig && poolConfig.hostRole) ? poolConfig.hostRole : "play";
+    if (poolSetup) poolSetup.hostUsername = account?.accountUsername || null; // lets the client know which player is the pool host
     if (poolSetup && poolSetup.mode === "manual" && poolSetup.hostRole === "play") {
       poolSetup.participantAccountIds.push(account.accountId);
       const w = cleanPayoutWallet(poolConfig.payoutWallet);
