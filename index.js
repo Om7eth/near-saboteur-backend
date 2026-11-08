@@ -1325,6 +1325,54 @@ async function confirmParticipant(room, roomCode, accountId) {
 // One AFK or confused player used to block the payout for everyone; the
 // leaderboard is computed by the server, so a confirm step proved nothing.
 const AUTO_SETTLE_DELAY_MS = 15 * 1000;
+// [EARLY END] Every way a pool can end before all its matches are played:
+//  - no match finished  -> cancelled (testnet: refund on-chain; Real NEAR: nothing owed)
+//  - 1+ matches finished -> settled on the points from the matches that WERE played
+const POOL_IDLE_SETTLE_MS = Number(process.env.POOL_IDLE_SETTLE_MS) || 10 * 60 * 1000; // env override is for local testing only // lobby sits 10 min without starting the next match
+const poolIdleTimers = {};
+function scheduleIdleSettle(room) {
+  const pool = room.pool;
+  if (!pool || pool.state !== "Locked" || (pool.matchesPlayed || 0) >= pool.maxMatches) return;
+  const key = pool.poolId || room.code;
+  clearTimeout(poolIdleTimers[key]);
+  pool.idleSettlesAt = Date.now() + POOL_IDLE_SETTLE_MS;
+  io.to(room.code).emit("poolUpdated", { pool }); // lobby shows the countdown
+  poolIdleTimers[key] = setTimeout(() => {
+    delete poolIdleTimers[key];
+    if (room.gameStarted) return;
+    finishPoolEarly(room, `no match started for ${POOL_IDLE_SETTLE_MS / 60000} minutes`);
+  }, POOL_IDLE_SETTLE_MS);
+}
+function cancelIdleSettle(room) {
+  const pool = room && room.pool;
+  if (!pool) return;
+  const key = pool.poolId || room.code;
+  clearTimeout(poolIdleTimers[key]); delete poolIdleTimers[key];
+  delete pool.idleSettlesAt;
+}
+async function finishPoolEarly(room, why) {
+  const pool = room.pool;
+  if (!pool || pool.state === "Distributed" || pool.state === "Refunded" || pool.state === "Cancelled") return;
+  cancelIdleSettle(room);
+  if ((pool.matchesPlayed || 0) >= 1 && pool.state === "Locked") {
+    pool.endedEarly = (pool.matchesPlayed || 0) < pool.maxMatches;
+    console.log(`[EARLY END] room ${room.code}: settling on ${pool.matchesPlayed}/${pool.maxMatches} matches (${why})`);
+    await settlePoolNow(room, why, true);
+    return;
+  }
+  // nothing finished -> cancel
+  if (pool.mode === "manual") {
+    pool.state = "Cancelled";
+    saveManualPool(pool, { state: "Cancelled", finishedAt: new Date() });
+    sendInboxMessage(pool.hostAccountId, { title: `Pool cancelled · ${pool.poolName || "Pool game"}`, body: `No match was finished (${why}), so nobody is owed anything.`, nameTag: "Pool Games" }).catch(() => {});
+    io.to(room.code).emit("poolUpdated", { pool });
+  } else if ((pool.onChainParticipantAccountIds || []).length > 0) {
+    const refund = await cancelPoolOnChain(pool.onChainPoolId);
+    if (refund.success) pool.state = "Refunded";
+    console.log(`[EARLY END] room ${room.code}: pool cancelled (${why}) - refund ${refund.success ? "sent" : "FAILED: " + refund.error}`);
+    io.to(room.code).emit("poolUpdated", { pool });
+  }
+}
 const poolSettleTimers = {};
 function scheduleAutoSettle(room) {
   const pool = room.pool;
@@ -1334,12 +1382,13 @@ function scheduleAutoSettle(room) {
   pool.settlesAt = Date.now() + AUTO_SETTLE_DELAY_MS;
   poolSettleTimers[key] = setTimeout(() => settlePoolNow(room, "timer"), AUTO_SETTLE_DELAY_MS);
 }
-async function settlePoolNow(room, why) {
+async function settlePoolNow(room, why, partial) {
   const pool = room.pool;
   if (!pool) return;
   const key = pool.poolId || pool.onChainPoolId || room.code;
   if (poolSettleTimers[key]) { clearTimeout(poolSettleTimers[key]); delete poolSettleTimers[key]; }
-  if (pool.state !== "Locked" || (pool.matchesPlayed || 0) < pool.maxMatches || pool.settling) return;
+  if (pool.state !== "Locked" || pool.settling) return;
+  if ((pool.matchesPlayed || 0) < (partial ? 1 : pool.maxMatches)) return;
   pool.settling = true;
   try {
     console.log(`[AUTO SETTLE] room ${room.code} pool ${key} settling (${why})`);
@@ -1576,7 +1625,9 @@ function scheduleRoomEmptyClose(roomCode) {
     const room = rooms[roomCode];
     if (!room) return;
     if (Object.keys(room.players).length > 0) return; // someone came back - stay open
-    if (room.pool && poolIsCancellable(room.pool) && (room.pool.onChainParticipantAccountIds || []).length > 0) {
+    if (room.pool && room.pool.mode === "manual") { await finishPoolEarly(room, "room empty for 3 minutes"); }
+    else if (room.pool && room.pool.state === "Locked" && (room.pool.matchesPlayed || 0) >= 1) { await finishPoolEarly(room, "room empty for 3 minutes"); }
+    else if (room.pool && poolIsCancellable(room.pool) && (room.pool.onChainParticipantAccountIds || []).length > 0) {
       const refund = await cancelPoolOnChain(room.pool.onChainPoolId);
       if (refund.success) {
         console.log(`[AUTO-CLOSE] Pool #${room.pool.onChainPoolId} cancelled + refunded on-chain (room ${roomCode} empty 3+ min).`);
@@ -1667,8 +1718,11 @@ const manualPoolSchema = new mongoose.Schema({
   isPublic: Boolean,
   state: { type: String, default: "Open" }, // Open | Live | Finished | Cancelled
   players: [{ accountId: String, name: String, username: String, wallet: String, _id: false }],
-  winners: [{ rank: Number, accountId: String, name: String, username: String, wallet: String, points: Number, amountNear: Number, paidAt: Date, _id: false }],
+  winners: [{ rank: Number, accountId: String, name: String, username: String, wallet: String, points: Number, amountNear: Number, tied: Boolean, paidAt: Date, _id: false }],
   finishedAt: Date,
+  leaderboard: { type: mongoose.Schema.Types.Mixed, default: {} }, // accountId -> points, saved after every match
+  endedEarly: { type: Boolean, default: false },  // settled before all planned matches were played
+  unclaimedNear: { type: Number, default: 0 },    // prize left with the host (fewer scorers than paid places)
 }, { timestamps: true });
 manualPoolSchema.index({ "players.accountId": 1 });
 const ManualPool = mongoose.model("ManualPool", manualPoolSchema);
@@ -1709,42 +1763,116 @@ function manualPoolPlayers(room) {
 }
 // Ranks every non-spectator participant by total pool points and pays the
 // host's split down the list - called instead of the on-chain payout.
-async function settleManualPool(room, roomCode) {
-  const pool = room.pool;
+//  - Ties: players on the same points share the places they cover equally
+//    (two tied for #1 on a 50/30/20 split each get 40%).
+//  - Fewer scorers than paid places: the leftover share stays with the host.
+//  - Only players with more than 0 points can win.
+function computeManualWinners(pool, info) {
+  const split = pool.split || [];
+  const excluded = pool.hostRole !== "play" ? pool.hostAccountId : null;
   const ranked = Object.entries(pool.leaderboard || {})
-    .filter(([accountId, pts]) => pts > 0 && accountId !== (pool.hostRole !== "play" ? pool.hostAccountId : "__"))
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, (pool.split || []).length);
-  const people = await Player.find({ _id: { $in: ranked.map(([id]) => id) } }, "name username payoutWallet").catch(() => []);
-  const byId = new Map(people.map((p) => [p._id.toString(), p]));
-  const winners = ranked.map(([accountId, points], i) => {
-    const pl = byId.get(accountId);
-    return {
-      rank: i + 1, accountId, points,
-      name: pl?.name || "Player", username: pl?.username || null,
-      wallet: poolWallets(pool)[accountId] || pl?.payoutWallet || null,
-      amountNear: Math.round(pool.prizeNear * (pool.split[i] / 100) * 1000) / 1000,
-      paidAt: null,
-    };
-  });
-  pool.state = "Distributed";
-  pool.winners = winners;
-  saveManualPool(pool, { state: "Finished", winners, finishedAt: new Date(), matchesPlayed: pool.matchesPlayed || 0, players: manualPoolPlayers(room) });
+    .filter(([id, pts]) => pts > 0 && id !== excluded)
+    .sort((a, b) => b[1] - a[1]);
+  const winners = [];
+  let place = 0;
+  for (let i = 0; i < ranked.length && place < split.length; ) {
+    let j = i;
+    while (j < ranked.length && ranked[j][1] === ranked[i][1]) j++;
+    const group = ranked.slice(i, j);
+    const covered = split.slice(place, place + group.length);
+    const sharePct = covered.reduce((a, b) => a + b, 0) / group.length;
+    for (const [accountId, points] of group) {
+      const who = info(accountId);
+      winners.push({
+        rank: place + 1, accountId, points, tied: group.length > 1,
+        name: who.name || "Player", username: who.username || null, wallet: who.wallet || null,
+        amountNear: Math.floor(pool.prizeNear * (sharePct / 100) * 1000) / 1000, // floor: never pay out more than the prize
+        paidAt: null,
+      });
+    }
+    place += group.length; i = j;
+  }
+  const paid = winners.reduce((a, w) => a + w.amountNear, 0);
+  const unclaimedNear = Math.max(0, Math.round((pool.prizeNear - paid) * 1000) / 1000);
+  return { winners, unclaimedNear };
+}
+function notifyManualSettle(pool, winners, unclaimedNear) {
+  const early = pool.endedEarly ? ` The pool ended after ${pool.matchesPlayed} of ${pool.maxMatches} matches, so the standings after those matches count.` : "";
   for (const w of winners) {
     sendInboxMessage(w.accountId, {
-      title: `You placed #${w.rank} in ${pool.poolName || "a pool game"}`,
-      body: `Your prize is ${w.amountNear} NEAR. The host pays it by hand to ${w.wallet || "your wallet (add one in Pool Games)"} — you'll get another message once it's sent.`,
+      title: `You placed #${w.rank}${w.tied ? " (tied)" : ""} in ${pool.poolName || "a pool game"}`,
+      body: `Your prize is ${w.amountNear} NEAR. The host pays it by hand to ${w.wallet || "your wallet (add one in Pool Games)"} — you'll get another message once it's sent.${early}`,
       nameTag: "Pool Games",
     }).catch(() => {});
   }
+  const kept = unclaimedNear > 0 ? ` ${unclaimedNear} NEAR wasn't won by anyone (not enough players scored), so you keep it.` : "";
   sendInboxMessage(pool.hostAccountId, {
-    title: `Pay your winners · ${pool.poolName || "Pool game"}`,
-    body: `${winners.length} winner${winners.length === 1 ? "" : "s"} to pay, ${pool.prizeNear} NEAR in total. Open Pool Games → History → Pay winners for their wallets.`,
+    title: winners.length ? `Pay your winners · ${pool.poolName || "Pool game"}` : `Pool finished · ${pool.poolName || "Pool game"}`,
+    body: winners.length
+      ? `${winners.length} winner${winners.length === 1 ? "" : "s"} to pay, ${Math.round((pool.prizeNear - unclaimedNear) * 1000) / 1000} NEAR in total. Open Pool Games → History → Pay winners for their wallets.${kept}${early}`
+      : `Nobody scored any points, so there is nobody to pay - you keep the whole prize.${early}`,
     nameTag: "Pool Games",
   }).catch(() => {});
-  io.to(roomCode).emit("poolDistributed", { success: true, manual: true, winners, rankedWinnerAccountIds: winners.map((w) => w.accountId) });
+}
+async function settleManualPool(room, roomCode) {
+  const pool = room.pool;
+  const ids = Object.keys(pool.leaderboard || {});
+  const people = await Player.find({ _id: { $in: ids } }, "name username payoutWallet").catch(() => []);
+  const byId = new Map(people.map((p) => [p._id.toString(), p]));
+  const { winners, unclaimedNear } = computeManualWinners(pool, (id) => {
+    const pl = byId.get(id);
+    return { name: pl?.name, username: pl?.username, wallet: poolWallets(pool)[id] || pl?.payoutWallet };
+  });
+  pool.state = "Distributed";
+  pool.winners = winners;
+  pool.unclaimedNear = unclaimedNear;
+  saveManualPool(pool, { state: "Finished", winners, unclaimedNear, endedEarly: !!pool.endedEarly, finishedAt: new Date(), matchesPlayed: pool.matchesPlayed || 0, leaderboard: pool.leaderboard || {}, players: manualPoolPlayers(room) });
+  notifyManualSettle(pool, winners, unclaimedNear);
+  io.to(roomCode).emit("poolDistributed", { success: true, manual: true, winners, unclaimedNear, endedEarly: !!pool.endedEarly, rankedWinnerAccountIds: winners.map((w) => w.accountId) });
   io.to(roomCode).emit("poolUpdated", { pool });
   return { success: true, manual: true };
+}
+// Every 2 min, touch each manual pool that still has a live room here - so a
+// second server sharing the database (or this one after a restart) never
+// mistakes a running pool for an abandoned one.
+function manualPoolHeartbeat() {
+  if (!MONGODB_URI) return;
+  const ids = Object.values(rooms).map((r) => r.pool && r.pool.mode === "manual" && r.pool.poolId).filter(Boolean);
+  if (ids.length) ManualPool.updateMany({ poolId: { $in: ids }, state: { $in: ["Open", "Live"] } }, { $set: { updatedAt: new Date() } }, { timestamps: false }).catch(() => {});
+}
+setInterval(manualPoolHeartbeat, 2 * 60 * 1000);
+// [EARLY END] After a server restart the room is gone but the saved pool
+// isn't: settle it from its last saved standings (or cancel it if no match
+// had finished). Pools still running in a live room are left alone.
+async function reconcileManualPools() {
+  if (!MONGODB_URI) return;
+  try {
+    const live = new Set(Object.values(rooms).map((r) => r.pool && r.pool.poolId).filter(Boolean));
+    // 15 min without a heartbeat = no server has this room any more (see manualPoolHeartbeat)
+    const stale = await ManualPool.find({ state: { $in: ["Open", "Live"] }, updatedAt: { $lt: new Date(Date.now() - 15 * 60 * 1000) } }).lean();
+    for (const doc of stale) {
+      if (live.has(doc.poolId)) continue;
+      if ((doc.matchesPlayed || 0) < 1) {
+        await ManualPool.updateOne({ poolId: doc.poolId, state: doc.state }, { $set: { state: "Cancelled", finishedAt: new Date() } });
+        sendInboxMessage(doc.hostAccountId, { title: `Pool cancelled · ${doc.poolName || "Pool game"}`, body: "The room closed before any match finished, so nobody is owed anything.", nameTag: "Pool Games" }).catch(() => {});
+        console.log(`[EARLY END] manual pool ${doc.poolId} cancelled (room gone, 0 matches)`);
+        continue;
+      }
+      const pool = { ...doc, endedEarly: (doc.matchesPlayed || 0) < (doc.maxMatches || 1) };
+      const byId = new Map((doc.players || []).map((p) => [p.accountId, p]));
+      const people = await Player.find({ _id: { $in: Object.keys(doc.leaderboard || {}) } }, "name username payoutWallet").catch(() => []);
+      const dbById = new Map(people.map((p) => [p._id.toString(), p]));
+      const { winners, unclaimedNear } = computeManualWinners(pool, (id) => {
+        const a = byId.get(id) || {}; const b = dbById.get(id);
+        return { name: a.name || b?.name, username: a.username || b?.username, wallet: a.wallet || b?.payoutWallet };
+      });
+      // only the first reconciler to flip the state sends anything
+      const res = await ManualPool.updateOne({ poolId: doc.poolId, state: doc.state }, { $set: { state: "Finished", winners, unclaimedNear, endedEarly: pool.endedEarly, finishedAt: new Date() } });
+      if (!res.modifiedCount) continue;
+      notifyManualSettle(pool, winners, unclaimedNear);
+      console.log(`[EARLY END] manual pool ${doc.poolId} settled from snapshot (${doc.matchesPlayed}/${doc.maxMatches} matches)`);
+    }
+  } catch (e) { console.error("[EARLY END] reconcileManualPools failed:", e.message); }
 }
 // Fire-and-forget - sending a notification should never be able to
 // block or fail the real event that triggered it (a pool payout, a
@@ -7190,7 +7318,13 @@ function stagePendingPointsForRoom(room) {
     // running, match-by-match leaderboard - see the block comment above
     // getOrCreateRoomLeaderboardEntry.
     const lbEntry = getOrCreateRoomLeaderboardEntry(room, p.accountId, p.accountUsername);
-    lbEntry.matches.push({ matchId: room.currentMatchId || "", points: p.pendingPoints });
+    lbEntry.matches.push({
+      matchId: room.currentMatchId || "", points: p.pendingPoints,
+      // [PER-MATCH STATS] what the player actually did in this match - shown in the lobby standings
+      role: p.role || null, won: !!p.pendingWon, survived: !!p.alive,
+      missionsDone: Math.max(p.missionsDone || 0, p.pendingMissionsDone || 0), missionsTotal: p.missionsTotal || 0,
+      kills: p.killsCount || 0, meetingsSurvived: p.meetingsSurvivedCount || 0, sabotages: p.sabotageActionsCount || 0,
+    });
     lbEntry.totalPoints += p.pendingPoints;
   });
   // [POOL GAMES] One match in this pool just ended - advance the count.
@@ -7213,6 +7347,8 @@ function stagePendingPointsForRoom(room) {
     // confirm anything any more: the pool pays out on its own a short moment
     // after the last match (enough to see the result screen).
     if (room.pool.matchesPlayed >= room.pool.maxMatches) scheduleAutoSettle(room);
+    else scheduleIdleSettle(room); // [EARLY END] next match must start within 10 min
+    saveManualPool(room.pool, { matchesPlayed: room.pool.matchesPlayed, leaderboard: room.pool.leaderboard, players: manualPoolPlayers(room) }); // survives a restart
     // [POOL GAMES] Let the room's Lobby screen show live pool progress
     // (matches played so far, current standings) without needing to
     // poll anything.
@@ -10088,7 +10224,7 @@ io.on("connection", (socket) => {
     // the "match completes but host still ends up refunded instead of
     // the top players getting paid" risk to guard against.
     const wasOnChainPoolHostLeaving = !!(
-      room.pool && !room.gameStarted && poolIsCancellable(room.pool) &&
+      room.pool && room.pool.mode !== "manual" && !room.gameStarted && poolIsCancellable(room.pool) &&
       departingAccountId && departingAccountId === room.pool.hostAccountId
     );
     // [BUG FIX - PAID PARTICIPANT LEAVING PRE-GAME HAD NO REFUND PATH]
@@ -10221,7 +10357,7 @@ io.on("connection", (socket) => {
               } else {
                 console.error(`[LAST PLAYER LEFT] Pool #${room.pool.onChainPoolId} could NOT be refunded automatically (room ${roomCode} emptied via explicit leave): ${refund.error}.`);
               }
-            } else if (room.pool.state === "Locked" && room.pool.matchesPlayed >= room.pool.maxMatches) {
+            } else if (room.pool.state === "Locked" && (room.pool.matchesPlayed || 0) >= 1 /* [EARLY END] partial result counts */) {
               const outcome = await distributePoolPrizes(room, roomCode);
               console.log(outcome.success
                 ? `[LAST PLAYER LEFT] Pool #${room.pool.onChainPoolId} settled from final leaderboard (room ${roomCode} emptied via explicit leave, all matches were done).`
@@ -10458,7 +10594,7 @@ io.on("connection", (socket) => {
         // the room just closed with real money stuck on-chain forever,
         // nobody ever refunded.
         poolNeedsRefundOnClose = true;
-      } else if (room.pool.state === "Locked" && room.pool.matchesPlayed >= room.pool.maxMatches) {
+      } else if (room.pool.state === "Locked" && (room.pool.matchesPlayed || 0) >= 1 /* [EARLY END] partial result counts */) {
         // [BUG FIX - STILL STUCK EVEN AFTER ALL MATCHES DONE] Distribution
         // (confirmFinalResult) only fires once EVERY participant has
         // individually tapped Confirm on the final standings screen - if
@@ -10475,7 +10611,7 @@ io.on("connection", (socket) => {
           return;
         }
       } else {
-        socket.emit("closeRoomError", { message: "At least one match has already been played - this has to be settled through the final leaderboard, not closed directly." });
+        socket.emit("closeRoomError", { message: "This pool can't be closed right now - try again in a moment." });
         return;
       }
     }
@@ -10483,7 +10619,9 @@ io.on("connection", (socket) => {
     // Tell every OTHER player in the room right now, before it's gone -
     // the frontend sends them back to Home with a clear reason.
     socket.to(roomCode).emit("roomClosedByHost");
-    if (poolNeedsRefundOnClose && (room.pool.onChainParticipantAccountIds || []).length > 0) {
+    if (poolNeedsRefundOnClose && room.pool.mode === "manual") {
+      await finishPoolEarly(room, "host closed the room before any match finished");
+    } else if (poolNeedsRefundOnClose && (room.pool.onChainParticipantAccountIds || []).length > 0) {
       const refund = await cancelPoolOnChain(room.pool.onChainPoolId);
       if (refund.success) {
         console.log(`[CLOSE ROOM] Pool #${room.pool.onChainPoolId} cancelled + refunded on-chain (closed by host, room ${roomCode}).`);
@@ -10958,6 +11096,7 @@ io.on("connection", (socket) => {
     // here. The only remaining gate: the host's own lock_participation
     // call (made right when they press Start) needs to have actually
     // succeeded first - see confirmPoolLocked.
+    cancelIdleSettle(room); // [EARLY END] the next match started in time
     if (room.pool && room.pool.mode === "manual" && room.pool.state === "Open") {
       room.pool.state = "Locked"; // nothing on-chain to lock - the first match just starts it
       saveManualPool(room.pool, { state: "Live", players: manualPoolPlayers(room) });
@@ -12093,7 +12232,7 @@ io.on("connection", (socket) => {
                   } else {
                     console.error(`[EVERYONE DISCONNECTED] Pool #${room.pool.onChainPoolId} could NOT be refunded automatically (room ${roomCode} emptied mid-game): ${refund.error}.`);
                   }
-                } else if (room.pool.state === "Locked" && room.pool.matchesPlayed >= room.pool.maxMatches) {
+                } else if (room.pool.state === "Locked" && (room.pool.matchesPlayed || 0) >= 1 /* [EARLY END] partial result counts */) {
                   // Every match actually finished before everyone
                   // disconnected - settle from the real final standings
                   // exactly like closeRoomPermanently's own fallback
@@ -12175,7 +12314,7 @@ io.on("connection", (socket) => {
         // needlessly cancels a whole pool.
         const departedAccountId = stillPlayer.accountId || null;
         const mustCancelPoolOnDepart = !!(
-          stillRoom.pool && !stillRoom.gameStarted && poolIsCancellable(stillRoom.pool) &&
+          stillRoom.pool && stillRoom.pool.mode !== "manual" && !stillRoom.gameStarted && poolIsCancellable(stillRoom.pool) &&
           departedAccountId && (
             departedAccountId === stillRoom.pool.hostAccountId ||
             (!stillRoom.pool.hostFunded && (stillRoom.pool.onChainParticipantAccountIds || []).includes(departedAccountId))
@@ -12449,9 +12588,9 @@ setInterval(() => {
 // ready right after a fresh boot - exactly the moment this is most
 // likely to actually find something to do, since a restart is one of
 // the two things this whole mechanism exists to recover from.
-setTimeout(() => { reconcileOrphanedPools(); }, 30 * 1000);
+setTimeout(() => { reconcileOrphanedPools(); reconcileManualPools(); }, 30 * 1000);
 const RECONCILE_INTERVAL_MS = 3 * 60 * 1000;
-setInterval(() => { reconcileOrphanedPools(); }, RECONCILE_INTERVAL_MS);
+setInterval(() => { reconcileOrphanedPools(); reconcileManualPools(); }, RECONCILE_INTERVAL_MS);
 
 const PORT = process.env.PORT || 3000;
 

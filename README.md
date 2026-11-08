@@ -33,6 +33,22 @@ Relevant endpoints and events:
   - `POST /pools/payout-wallet`: a player saves or changes their prize address.
 - **Socket events:** `createRoom` with `poolConfig.mode = "manual"`, plus `joinRoom` / `requestJoinRoom` with `payoutWallet`.
 
+### When a pool ends early
+
+Prizes go out automatically 15 seconds after the last match. Nobody has to confirm anything. A pool can also end before all its matches are played:
+
+| Situation | What happens |
+|---|---|
+| No match finished: the room empties, the host closes it, or the server restarts | **Cancelled.** Testnet pools refund entry fees on-chain. In Real NEAR pools nobody is owed anything. |
+| Some matches finished (for example 1 or 2 of 3): the room is empty for 3 minutes, the host closes it, or the lobby sits idle | **Settled on the matches played.** The standings after those matches count, and the result is marked "ended early". |
+| The lobby sits idle between matches | The next match must start within **10 minutes**. The lobby shows a countdown. After that, the pool settles on the matches played so far. |
+| The server restarts in the middle of a Real NEAR pool | Standings are saved after every match. Once no server has touched the pool for 15 minutes, it is settled from those saved standings, or cancelled if no match had finished. |
+| Players tie (Real NEAR) | The tied players share the places they cover equally. For example, two players tied for #1 on a 50/30/20 split each get 40%. The testnet contract always pays 50/30/20 by position. |
+| Fewer players scored than there are paid places | The prize for the empty places stays with the host. Only players with more than 0 points can win. |
+| A Real NEAR host leaves before the first match | The pool stays open, and any player can run the lobby. A testnet pool host leaving before the start still cancels and refunds the pool. |
+
+The lobby **Standings** board shows each player's line for every match: role, won or lost, missions or kills, and points. Tap a player to see it.
+
 ## Testnet wallet gift
 
 These rules apply on **testnet only** (`NEAR_NETWORK=testnet`). None of them run on mainnet.
