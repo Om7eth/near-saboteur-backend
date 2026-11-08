@@ -32,3 +32,12 @@ Relevant endpoints and events:
   - `POST /pools/manual/:poolId/paid`: the host marks a winner as paid.
   - `POST /pools/payout-wallet`: a player saves or changes their prize address.
 - **Socket events:** `createRoom` with `poolConfig.mode = "manual"`, plus `joinRoom` / `requestJoinRoom` with `payoutWallet`.
+
+## Testnet wallet gift
+
+These rules apply on **testnet only** (`NEAR_NETWORK=testnet`). None of them run on mainnet.
+
+- **New in-game wallets:** each new wallet is created with 0.05 NEAR, which account creation uses. On top of that, the funder (`ORACLE_ACCOUNT_ID`) sends it **1 test NEAR**.
+- **Funder reserve:** the gift is only sent if the funder still has **5 NEAR** left after sending it. Below that, wallets are still created, just without the gift.
+- **Older wallets:** a wallet that was made before this and has less than 0.5 test NEAR gets the same 1 NEAR, **once**, via `POST /wallet/testnet-topup`.
+- **Settings:** override the amounts with `TESTNET_WALLET_GIFT_NEAR` (default 1) and `TESTNET_FUNDER_RESERVE_NEAR` (default 5).

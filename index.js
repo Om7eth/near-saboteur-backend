@@ -201,6 +201,8 @@ const playerSchema = new mongoose.Schema({
   walletResetRequestedAt: { type: Date, default: null },
   // [POOL v2] mainnet .near address a player gave for Real-NEAR pool prizes (host pays by hand)
   payoutWallet: { type: String, default: null },
+  // [TESTNET GIFT] when an older, empty in-game wallet got its one-time 1 test NEAR
+  testnetTopupAt: { type: Date, default: null },
   walletResetApproved: { type: Boolean, default: false },
   // [NEW FEATURE - WALLET-BASED IDENTITY] A NEAR wallet the player has
   // cryptographically proven ownership of via a signed message (NEP-413,
@@ -853,6 +855,34 @@ function pickBonusMissionType(room) {
 }
 
 let oracleAccount = null;
+// [TESTNET GIFT] Testnet only: every new in-game wallet gets 1 test NEAR on top
+// of the 0.05 that creating the account costs, so it can actually play pool
+// games (gas, small pools). Skipped - never failing wallet creation - whenever
+// sending it would leave the funder (ORACLE_ACCOUNT_ID) under the reserve, so
+// the funder can always keep creating wallets. Never runs on mainnet.
+const TESTNET_GIFT_NEAR = Number(process.env.TESTNET_WALLET_GIFT_NEAR || 1);
+const TESTNET_FUNDER_RESERVE_NEAR = Number(process.env.TESTNET_FUNDER_RESERVE_NEAR || 5);
+async function giftTestnetNear(accountId) {
+  if (NEAR_NETWORK !== "testnet" || !(TESTNET_GIFT_NEAR > 0)) return { sent: false, reason: "not testnet" };
+  const funder = await getOracleAccount();
+  if (!funder) return { sent: false, reason: "no funder" };
+  try {
+    const nearAPI = await loadNearAPI();
+    const balance = BigInt(await funder.getBalance());
+    const needed = BigInt(nearAPI.nearToYocto(String(TESTNET_GIFT_NEAR + TESTNET_FUNDER_RESERVE_NEAR)));
+    if (balance < needed) {
+      console.warn(`[TESTNET GIFT] funder ${ORACLE_ACCOUNT_ID} is low (${nearAPI.yoctoToNear ? nearAPI.yoctoToNear(balance) : balance} yocto) - keeping the ${TESTNET_FUNDER_RESERVE_NEAR} NEAR reserve, not sending ${TESTNET_GIFT_NEAR} NEAR to ${accountId}`);
+      return { sent: false, reason: "funder low" };
+    }
+    await funder.transfer({ receiverId: accountId, amount: BigInt(nearAPI.nearToYocto(String(TESTNET_GIFT_NEAR))) });
+    console.log(`[TESTNET GIFT] sent ${TESTNET_GIFT_NEAR} test NEAR to ${accountId}`);
+    return { sent: true, amountNear: TESTNET_GIFT_NEAR };
+  } catch (e) {
+    console.error(`[TESTNET GIFT] ${accountId} failed:`, e.message);
+    return { sent: false, reason: "error" };
+  }
+}
+
 async function getOracleAccount() {
   if (!ORACLE_ACCOUNT_ID || !ORACLE_PRIVATE_KEY) return null;
   if (!oracleAccount) {
@@ -2639,7 +2669,8 @@ app.post("/wallet/create-named-account", async (req, res) => {
       }
       throw createErr;
     }
-    res.json({ accountId: newAccountId });
+    const gift = await giftTestnetNear(newAccountId); // [TESTNET GIFT] 1 test NEAR on top, if the funder can spare it
+    res.json({ accountId: newAccountId, giftedNear: gift.sent ? gift.amountNear : 0 });
   } catch (err) {
     console.error("[WALLET] /wallet/create-named-account error:", err.message);
     res.status(500).json({ message: "Could not create your wallet right now. Try again in a moment." });
@@ -3709,6 +3740,33 @@ app.post("/pools/payout-wallet", async (req, res) => {
     res.json({ ok: true, wallet: w });
   } catch (e) {
     res.status(500).json({ message: "Couldn't save that wallet." });
+  }
+});
+
+// [TESTNET GIFT] One-time 1 test NEAR for an existing in-game wallet that's
+// (nearly) empty - wallets made before the gift existed only ever got the
+// 0.05 that account creation uses up. Testnet only, once per player.
+app.post("/wallet/testnet-topup", async (req, res) => {
+  try {
+    if (NEAR_NETWORK !== "testnet") return res.json({ sent: false, reason: "not testnet" });
+    const player = await Player.findOne({ sessionToken: String((req.body && req.body.sessionToken) || ""), verified: true });
+    if (!player) return res.status(401).json({ message: "Not logged in." });
+    if (player.walletType !== "ingame" || !player.walletAddress) return res.json({ sent: false, reason: "no in-game wallet" });
+    if (player.testnetTopupAt) return res.json({ sent: false, reason: "already topped up" });
+    const nearAPI = await loadNearAPI();
+    const provider = new nearAPI.JsonRpcProvider({ url: NEAR_RPC_URL });
+    const view = await provider.viewAccount({ accountId: player.walletAddress }).catch(() => null);
+    if (!view) return res.json({ sent: false, reason: "wallet not found on-chain" });
+    if (BigInt(view.amount) >= BigInt(nearAPI.nearToYocto("0.5"))) return res.json({ sent: false, reason: "has enough" });
+    // claim the one-time slot first so two quick calls can't both send
+    const claimed = await Player.updateOne({ _id: player._id, testnetTopupAt: null }, { $set: { testnetTopupAt: new Date() } });
+    if (!claimed.modifiedCount) return res.json({ sent: false, reason: "already topped up" });
+    const gift = await giftTestnetNear(player.walletAddress);
+    if (!gift.sent) await Player.updateOne({ _id: player._id }, { $set: { testnetTopupAt: null } }); // let them try again later
+    res.json(gift);
+  } catch (e) {
+    console.error("[TESTNET GIFT] topup error:", e.message);
+    res.status(500).json({ sent: false, message: "Couldn't top up right now." });
   }
 });
 
