@@ -500,6 +500,12 @@ const poolRecordSchema = new mongoose.Schema({
   // a real result can still be safely paid out to the right people even
   // if the server dies before the pool's own normal flow gets to finish.
   leaderboardSnapshot: { type: mongoose.Schema.Types.Mixed, default: {} },
+  // [PAID HISTORY] filled in when the contract pays out
+  poolName: { type: String, default: null },
+  isPublic: { type: Boolean, default: true },
+  winners: { type: [{ rank: Number, accountId: String, name: String, avatarId: String, points: Number, amountNear: Number, _id: false }], default: [] },
+  standings: { type: mongoose.Schema.Types.Mixed, default: [] }, // [{ accountId, name, avatarId, matches:[pts], total }]
+  payoutTxHash: { type: String, default: null },
   settlementAttempts: { type: Number, default: 0 },
   lastSettlementError: { type: String, default: null },
   lastSettlementAttemptAt: { type: Date, default: null },
@@ -1015,9 +1021,11 @@ async function distributePoolPrizesOnce(room, roomCode) {
 
   io.to(roomCode).emit("poolDistributing", {});
   const outcome = await distributePrizesOnChain(room.pool.onChainPoolId, rankedWinners);
+  const payoutTxHash = outcome.success ? (outcome.result?.transaction?.hash || outcome.result?.transaction_outcome?.id || null) : null;
   if (outcome.success) {
     room.pool.state = "Distributed";
-    savePoolRecord({ onChainPoolId: room.pool.onChainPoolId }, { state: "Distributed", settledAt: new Date(), lastSettlementError: null });
+    room.pool.payoutTxHash = payoutTxHash;
+    savePoolRecord({ onChainPoolId: room.pool.onChainPoolId }, { state: "Distributed", settledAt: new Date(), lastSettlementError: null, payoutTxHash });
   } else {
     // [NEW FEATURE - FUNDS SAFETY: PERSISTENT POOL TRACKING] Record the
     // failure so reconcileOrphanedPools picks this up and keeps retrying
@@ -1030,8 +1038,6 @@ async function distributePoolPrizesOnce(room, roomCode) {
     });
     PoolRecord.updateOne({ onChainPoolId: room.pool.onChainPoolId }, { $inc: { settlementAttempts: 1 } }).catch(() => {});
   }
-  io.to(roomCode).emit("poolDistributed", { success: outcome.success, error: outcome.error || null, rankedWinners, rankedWinnerAccountIds });
-  io.to(roomCode).emit("poolUpdated", { pool: room.pool });
 
   // [NEW FEATURE - ACTIVITY HISTORY: POOL FINANCIALS] Same formula the
   // frontend's own Pool Complete popup already uses (see that
@@ -1074,6 +1080,19 @@ async function distributePoolPrizesOnce(room, roomCode) {
   // real settlement flow above it. Only sent when the on-chain payout
   // genuinely succeeded (same guard as nearWonByAccountId itself) and
   // only to real top-3 finishers who actually received a nonzero share.
+  // [PAID HISTORY + RESULT BANNER] who won what, and every player's match-by-match points
+  const lbList = getRoomLeaderboardList(room);
+  const lbById = new Map(lbList.map((e) => [e.accountId, e]));
+  const winnersOut = rankedWinnerAccountIds.map((accountId, i) => {
+    const e = lbById.get(accountId) || {};
+    return { rank: i + 1, accountId, name: e.name || e.username || "Player", avatarId: e.avatarId || null, points: e.totalPoints || 0, amountNear: Math.round((nearWonByAccountId.get(accountId) || 0) * 1000) / 1000 };
+  });
+  const standings = lbList.filter((e) => (room.pool.onChainParticipantAccountIds || []).includes(e.accountId))
+    .map((e) => ({ accountId: e.accountId, name: e.name || e.username || "Player", avatarId: e.avatarId || null, matches: (e.matches || []).map((m) => m.points), total: e.totalPoints || 0 }));
+  if (outcome.success) savePoolRecord({ onChainPoolId: room.pool.onChainPoolId }, { winners: winnersOut, standings });
+  io.to(roomCode).emit("poolDistributed", { success: outcome.success, error: outcome.error || null, rankedWinners, rankedWinnerAccountIds, winners: winnersOut, payoutTxHash, entryFeeNear, potNear: Math.round(payoutPoolNear * 1000) / 1000 });
+  io.to(roomCode).emit("poolUpdated", { pool: room.pool });
+
   if (outcome.success) {
     const ordinal = (n) => (n === 1 ? "1st" : n === 2 ? "2nd" : "3rd");
     for (const [accountId, rank] of poolRankByAccountId.entries()) {
@@ -3855,11 +3874,24 @@ app.get("/pools/history", async (req, res) => {
         paidCount: paid, myRank: mine ? mine.rank : null, myPrize: mine ? mine.amountNear : null, myPaid: mine ? !!mine.paidAt : null,
       };
     };
-    const chainItem = (r) => ({
-      id: `chain_${r.onChainPoolId}`, kind: "auto", hosted: r.hostAccountId === me, name: r.poolName || "Pool game",
-      prizeNear: r.hostFunded ? r.entryFeeNear : (r.entryFeeNear || 0) * ((r.onChainParticipantAccountIds || []).length || 1),
-      maxMatches: r.maxMatches, state: r.state, players: (r.participantAccountIds || []).length, createdAt: r.createdAt,
-    });
+    const chainItem = (r) => {
+      const mine = (r.winners || []).find((w) => w.accountId === me);
+      const paidPlayers = (r.onChainParticipantAccountIds || []).length;
+      return {
+        id: `chain_${r.onChainPoolId}`, kind: "auto", paid: !r.hostFunded, hosted: r.hostAccountId === me, name: r.poolName || (r.hostFunded ? "Pool game" : "Paid Game"),
+        roomCode: r.roomCode || null, onChainPoolId: r.onChainPoolId,
+        entryFeeNear: r.entryFeeNear || 0,
+        prizeNear: r.hostFunded ? r.entryFeeNear : (r.entryFeeNear || 0) * (paidPlayers || 1),
+        potNear: r.hostFunded ? Math.round((r.entryFeeNear || 0) * 0.95 * 1000) / 1000 : Math.round((r.entryFeeNear || 0) * paidPlayers * 0.95 * 1000) / 1000,
+        maxMatches: r.maxMatches, matchesPlayed: r.matchesPlayed || 0, state: r.state,
+        players: paidPlayers || (r.participantAccountIds || []).length, createdAt: r.createdAt, finishedAt: r.settledAt || null,
+        winners: (r.winners || []).map((w) => ({ rank: w.rank, name: w.name, avatarId: w.avatarId, points: w.points, amountNear: w.amountNear, me: w.accountId === me })),
+        standings: (Array.isArray(r.standings) ? r.standings : []).map((e) => ({ name: e.name, avatarId: e.avatarId, matches: e.matches, total: e.total, me: e.accountId === me })),
+        payoutTxHash: r.payoutTxHash || null,
+        myRank: mine ? mine.rank : null, myPrize: mine ? mine.amountNear : null,
+        iPaidIn: (r.onChainParticipantAccountIds || []).includes(me),
+      };
+    };
     const hosted = [...hostedManual.map((m) => manualItem(m, true)), ...chainPools.filter((r) => r.hostAccountId === me).map(chainItem)]
       .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
     const joined = [...joinedManual.map((m) => manualItem(m, false)), ...chainPools.filter((r) => r.hostAccountId !== me).map(chainItem)]
@@ -9281,6 +9313,8 @@ io.on("connection", (socket) => {
         onChainParticipantAccountIds: poolSetup.onChainParticipantAccountIds,
         matchesPlayed: 0,
         leaderboardSnapshot: {},
+        poolName: poolSetup.poolName || null,
+        isPublic: !!isPublic,
       });
       // [NEW FEATURE - TRANSACTIONS LEDGER] createTxHash is client-
       // supplied (captured the instant the host's wallet confirmed
@@ -11113,6 +11147,14 @@ io.on("connection", (socket) => {
     if (playerIds.length < MIN_PLAYERS) {
       socket.emit("startGameError", { message: `Need at least ${MIN_PLAYERS} players.` });
       return;
+    }
+    // [PAID GAMES] the top 3 share the pot - fewer than 3 paid players makes no sense, even in dev mode
+    if (room.pool && room.pool.mode !== "manual" && !room.pool.hostFunded) {
+      const paidIn = playerIds.filter((id) => (room.pool.onChainParticipantAccountIds || []).includes(room.players[id].accountId)).length;
+      if (paidIn < 3) {
+        socket.emit("startGameError", { message: `Paid games need at least 3 players who paid the entry fee (${paidIn} so far).` });
+        return;
+      }
     }
 
     // [NEW POOL SYSTEM] In this design, participate() always happens
