@@ -4514,8 +4514,18 @@ async function verifyPlayPassTransfer(txHash, fromAccountId, minAmountYocto) {
   return { ok: false, error: "Could not verify this transaction. Please try again in a moment." };
 }
 
+// [BUG FIX] admin searches went into $regex unescaped
+function rxSafe(t) { return String(t || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
 function generateAdminToken() {
-  return "adm_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 12);
+  // [SECURITY FIX] was Math.random() - guessable. 32 random bytes now.
+  return "adm_" + crypto.randomBytes(32).toString("hex");
+}
+// [SECURITY FIX] Admin login: constant-time password check + lockout after
+// 5 wrong tries from one address for 15 minutes.
+const adminLoginFails = new Map(); // ip -> { n, until }
+function safeEqual(a, b) {
+  const x = Buffer.from(String(a || "")), y = Buffer.from(String(b || ""));
+  return x.length === y.length && crypto.timingSafeEqual(x, y);
 }
 async function requireAdmin(req, res, next) {
   const auth = req.headers.authorization || "";
@@ -4556,12 +4566,21 @@ app.post("/admin/login", async (req, res) => {
     return res.status(503).json({ message: "Admin dashboard is not configured on this server." });
   }
   const { username, password } = req.body || {};
-  let role = null;
-  if (username === ADMIN_USERNAME && password === ADMIN_PASSWORD) role = "full";
-  else if (VIEWER_ADMIN_USERNAME && username === VIEWER_ADMIN_USERNAME && password === VIEWER_ADMIN_PASSWORD) role = "viewer";
-  if (!role) {
-    return res.status(401).json({ message: "Incorrect username or password." });
+  const ip = String(req.headers["x-forwarded-for"] || req.socket.remoteAddress || "").split(",")[0].trim();
+  const fail = adminLoginFails.get(ip);
+  if (fail && fail.until > Date.now()) {
+    return res.status(429).json({ message: `Too many wrong tries. Try again in ${Math.ceil((fail.until - Date.now()) / 60000)} min.` });
   }
+  let role = null;
+  if (safeEqual(username, ADMIN_USERNAME) && safeEqual(password, ADMIN_PASSWORD)) role = "full";
+  else if (VIEWER_ADMIN_USERNAME && safeEqual(username, VIEWER_ADMIN_USERNAME) && safeEqual(password, VIEWER_ADMIN_PASSWORD)) role = "viewer";
+  if (!role) {
+    const n = (fail && fail.until && fail.until <= Date.now() ? 0 : (fail ? fail.n : 0)) + 1;
+    adminLoginFails.set(ip, { n, until: n >= 5 ? Date.now() + 15 * 60 * 1000 : 0 });
+    logAdminAction("admin-login-failed", { ip, tries: n });
+    return res.status(401).json({ message: n >= 5 ? "Too many wrong tries - locked for 15 minutes." : `Incorrect username or password. (${5 - n} tries left)` });
+  }
+  adminLoginFails.delete(ip);
   const token = generateAdminToken();
   try {
     await AdminSession.create({ token, role, expiresAt: new Date(Date.now() + ADMIN_SESSION_TTL_MS) });
@@ -5152,8 +5171,8 @@ app.get("/admin/matches", requireAdmin, async (req, res) => {
     const search = String(req.query.search || "").trim();
     const matchFilter = search
       ? { $or: [
-          { playerName: { $regex: search, $options: "i" } },
-          { roomCode: { $regex: search, $options: "i" } },
+          { playerName: { $regex: rxSafe(search), $options: "i" } },
+          { roomCode: { $regex: rxSafe(search), $options: "i" } },
         ] }
       : {};
     // Every matchId that has at least one record satisfying the search,
@@ -5199,14 +5218,22 @@ app.get("/admin/players", requireAdmin, async (req, res) => {
     const page = Math.max(1, parseInt(req.query.page, 10) || 1);
     const limit = 30;
     const search = String(req.query.search || "").trim();
+    // [BUG FIX] search went into $regex raw - "(" crashed the request and a crafted pattern could stall the DB
+    const safe = search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     const filter = search
       ? { $or: [
-          { name: { $regex: search, $options: "i" } },
-          { username: { $regex: search, $options: "i" } },
-          { email: { $regex: search, $options: "i" } },
-          { walletAddress: { $regex: search, $options: "i" } },
+          { name: { $regex: safe, $options: "i" } },
+          { username: { $regex: safe, $options: "i" } },
+          { email: { $regex: safe, $options: "i" } },
+          { walletAddress: { $regex: safe, $options: "i" } },
         ] }
       : {};
+    // [ADMIN v2] quick filters
+    const show = String(req.query.show || "");
+    if (show === "pass") filter.premiumUntil = { $gt: new Date() };
+    else if (show === "held") filter.accountHeld = true;
+    else if (show === "new") filter.createdAt = { $gte: new Date(Date.now() - 7 * 86400000) };
+    else if (show === "walletReset") { filter.walletResetRequestedAt = { $ne: null }; filter.walletResetApproved = { $ne: true }; }
     const [players, total] = await Promise.all([
       Player.find(filter, "-passwordHash -otpCode -walletKeystoreCiphertext -walletKeystoreSalt -walletKeystoreIv -sessionToken")
         .sort({ totalPoints: -1 }).skip((page - 1) * limit).limit(limit),
@@ -5223,6 +5250,7 @@ app.get("/admin/players", requireAdmin, async (req, res) => {
 // for drilling in from either the Players or Matches tab.
 app.get("/admin/players/:id", requireAdmin, async (req, res) => {
   try {
+    if (!mongoose.isValidObjectId(req.params.id)) return res.status(404).json({ message: "Player not found." });
     const player = await Player.findById(req.params.id, "-passwordHash -otpCode -walletKeystoreCiphertext -walletKeystoreSalt -walletKeystoreIv -sessionToken");
     if (!player) return res.status(404).json({ message: "Player not found." });
     // [BUG FIX - OLDER MATCHES INVISIBLE FOR ACTIVE PLAYERS] This used to
@@ -5245,7 +5273,11 @@ app.get("/admin/players/:id", requireAdmin, async (req, res) => {
       try {
         const nearAPI = await loadNearAPI();
         const provider = new nearAPI.JsonRpcProvider({ url: NEAR_RPC_URL });
-        const account = await provider.query({ request_type: "view_account", account_id: player.walletAddress, finality: "optimistic" });
+        // [PERF FIX] a missing wallet made the RPC hang ~3s - cap it at 1.5s
+        const account = await Promise.race([
+          provider.query({ request_type: "view_account", account_id: player.walletAddress, finality: "optimistic" }),
+          new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 1500)),
+        ]);
         walletBalanceNear = nearAPI.yoctoToNear(account.amount, 4);
       } catch (e) { /* leave null - account may not exist on-chain yet, or RPC hiccup */ }
     }
@@ -5291,6 +5323,12 @@ app.post("/admin/players/:id/hold", requireAdmin, requireFullAdmin, async (req, 
     player.sessionToken = null;
     player.sessionTokenExpiresAt = null;
     await player.save();
+    // [BUG FIX] a held player used to stay inside a running match - disconnect them now
+    for (const r of Object.values(rooms)) {
+      for (const [sid, p] of Object.entries(r.players)) {
+        if (p.accountId === String(player._id)) { const so = io.sockets.sockets.get(sid); if (so) { so.emit("sessionMovedElsewhere"); so.disconnect(true); } }
+      }
+    }
     logAdminAction("hold-account", { playerId: String(player._id), playerName: player.name, reason: player.accountHeldReason });
     res.json({ success: true });
   } catch (err) {
@@ -5755,17 +5793,32 @@ app.get("/admin/overview", requireAdmin, async (req, res) => {
     const startOfToday = new Date();
     startOfToday.setUTCHours(0, 0, 0, 0);
     const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const fortnightAgo = new Date(startOfToday.getTime() - 13 * 24 * 60 * 60 * 1000);
+    // [BUG FIX] MatchRecord has one row PER PLAYER per match - count distinct matchIds instead
+    const distinctMatches = (match) => MatchRecord.aggregate([{ $match: match }, { $group: { _id: "$matchId" } }, { $count: "n" }]).then((a) => a[0]?.n || 0);
+    const [byDay, newPlayersToday, refundsOwed, openReports, ppSold, manualUnpaid, customPending] = await Promise.all([
+      MatchRecord.aggregate([{ $match: { earnedAt: { $gte: fortnightAgo } } }, { $group: { _id: { d: { $dateToString: { format: "%Y-%m-%d", date: "$earnedAt" } }, m: "$matchId" } } }, { $group: { _id: "$_id.d", n: { $sum: 1 } } }, { $sort: { _id: 1 } }]).catch(() => []),
+      Player.countDocuments({ verified: true, createdAt: { $gte: startOfToday } }).catch(() => 0),
+      PlayPassPurchase.countDocuments({ status: "needs_refund" }).catch(() => 0),
+      PlayerReport.countDocuments({ status: "open" }).catch(() => 0),
+      PlayPassPurchase.aggregate([{ $match: { status: "granted" } }, { $group: { _id: null, n: { $sum: 1 }, near: { $sum: "$amountNear" } } }]).catch(() => []),
+      ManualPool.countDocuments({ state: "Finished", winners: { $elemMatch: { paidAt: null } } }).catch(() => 0),
+      CustomAvatarRequest.countDocuments({ status: "submitted" }).catch(() => 0),
+    ]);
+    const days = [];
+    for (let i = 13; i >= 0; i--) { const d = new Date(startOfToday.getTime() - i * 86400000).toISOString().slice(0, 10); days.push({ day: d, matches: (byDay.find((x) => x._id === d) || {}).n || 0 }); }
+    const playersOnline = Object.values(rooms).reduce((a, r) => a + Object.values(r.players).filter((p) => !p.isBot && !p.disconnectedAt).length, 0);
     const [
       totalPlayers, totalMatches, matchesToday, activePlayerIds,
       freePlayMatches, poolStyleMatches, needsAttentionCount,
       poolRecordsByFunding,
     ] = await Promise.all([
       Player.countDocuments({ verified: true }),
-      MatchRecord.countDocuments({}),
-      MatchRecord.countDocuments({ earnedAt: { $gte: startOfToday } }),
+      distinctMatches({}),
+      distinctMatches({ earnedAt: { $gte: startOfToday } }),
       MatchRecord.distinct("playerId", { earnedAt: { $gte: dayAgo } }),
-      MatchRecord.countDocuments({ isPoolGame: false }),
-      MatchRecord.countDocuments({ isPoolGame: true }),
+      distinctMatches({ isPoolGame: false }),
+      distinctMatches({ isPoolGame: true }),
       PoolRecord.countDocuments(fundsNeedsAttentionFilter()),
       // hostFunded=true is "Pool Games" mode, hostFunded=false is "Paid
       // Games" mode - both share isPoolGame=true on MatchRecord, this is
@@ -5784,6 +5837,10 @@ app.get("/admin/overview", requireAdmin, async (req, res) => {
       activePlayers24h: activePlayerIds.length,
       freePlayMatches, poolStyleMatches, poolGamesCreated, paidGamesCreated,
       needsAttentionCount,
+      // [ADMIN v2] what needs the admin + the 14-day chart
+      playersOnline, newPlayersToday, matchesByDay: days,
+      refundsOwed, openReports, manualPoolsUnpaid: manualUnpaid, customAvatarPending: customPending,
+      playPassSold: ppSold[0]?.n || 0, playPassRevenueNear: Math.round((ppSold[0]?.near || 0) * 1e5) / 1e5, playPassWallet: PLAY_PASS_MAINNET_RECEIVER,
     });
   } catch (err) {
     console.error("[ADMIN] /admin/overview error:", err.message);
@@ -5907,9 +5964,18 @@ app.get("/admin/revenue", requireAdmin, async (req, res) => {
     // instead of silently mixing gas-operating funds with real revenue.
     const revenueWalletSameAsOracle = PLAY_PASS_RECEIVING_ACCOUNT_ID === ORACLE_ACCOUNT_ID;
     const revenueWalletBalanceNear = await readBalance(PLAY_PASS_RECEIVING_ACCOUNT_ID);
+    // [ADMIN v2] Play Pass is real NEAR on mainnet now - read that wallet from mainnet, never add it to testnet totals
+    let playPassWalletBalanceNear = null;
+    try {
+      const j = await fetch(MAINNET_RPC_URLS[0], { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "query", params: { request_type: "view_account", finality: "final", account_id: PLAY_PASS_MAINNET_RECEIVER } }) }).then((r) => r.json());
+      if (j.result) playPassWalletBalanceNear = Number((BigInt(j.result.amount) / 10n ** 20n)) / 10000;
+    } catch (e) { /* leave null */ }
+    const ppMain = await PlayPassPurchase.aggregate([{ $match: { status: "granted" } }, { $group: { _id: null, n: { $sum: 1 }, near: { $sum: "$amountNear" } } }]).catch(() => []);
 
     res.json({
       network: NEAR_NETWORK,
+      playPassWallet: PLAY_PASS_MAINNET_RECEIVER, playPassWalletBalanceNear,
+      playPassMainnetSold: ppMain[0]?.n || 0, playPassMainnetRevenueNear: Math.round((ppMain[0]?.near || 0) * 1e5) / 1e5,
       platformFeesBalanceNear, // currently sitting on-chain, unwithdrawn
       lifetimeFeesNear: +lifetimeFeesNear.toFixed(4),
       oracleAccountId: ORACLE_ACCOUNT_ID || null,
@@ -5933,7 +5999,8 @@ app.get("/admin/revenue", requireAdmin, async (req, res) => {
       revenueWalletAccountId: PLAY_PASS_RECEIVING_ACCOUNT_ID || null,
       revenueWalletBalanceNear,
       revenueWalletSameAsOracle,
-      totalRevenueNear: +(lifetimeFeesNear + playPassRevenueNear + customAvatarRevenueNear).toFixed(4),
+      // [BUG FIX] testnet only - mainnet Play Pass money is reported separately above
+      totalRevenueNear: +(lifetimeFeesNear + customAvatarRevenueNear).toFixed(4),
     });
   } catch (err) {
     console.error("[ADMIN] /admin/revenue error:", err.message);
@@ -6495,7 +6562,7 @@ app.get("/admin/inbox", requireAdmin, async (req, res) => {
     let playerIdFilter = null;
     if (search) {
       const matchingPlayers = await Player.find(
-        { $or: [{ name: { $regex: search, $options: "i" } }, { username: { $regex: search, $options: "i" } }] },
+        { $or: [{ name: { $regex: rxSafe(search), $options: "i" } }, { username: { $regex: rxSafe(search), $options: "i" } }] },
         "_id"
       );
       playerIdFilter = matchingPlayers.map((p) => p._id);
@@ -6573,7 +6640,7 @@ app.get("/admin/rooms", requireAdmin, async (req, res) => {
     const limit = 20;
     const search = String(req.query.search || "").trim();
     const baseFilter = {};
-    if (search) baseFilter.roomCode = { $regex: search, $options: "i" };
+    if (search) baseFilter.roomCode = { $regex: rxSafe(search), $options: "i" };
     // Same fallback computed at the DB level - a real roomSessionId
     // when present, "legacy:<roomCode>" otherwise.
     const groupKeyExpr = { $ifNull: ["$roomSessionId", { $concat: ["legacy:", "$roomCode"] }] };
