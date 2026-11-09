@@ -177,8 +177,8 @@ function buildContext(room, botId, memory, now) {
   const me = room.players[botId];
   const meeting = room.meeting;
   const isSab = me.role === "saboteur";
-  const alive = Object.entries(room.players).filter(([, p]) => p.alive !== false);
-  const dead = Object.entries(room.players).filter(([, p]) => p.alive === false);
+  const alive = Object.entries(room.players).filter(([, p]) => p.alive !== false && !p.spectator);
+  const dead = Object.entries(room.players).filter(([, p]) => p.alive === false && !p.spectator); // [WATCH MODE] a watching host never died
   const caller = room.players[meeting.calledBy];
   const body = meeting.reportedBodyId && room.players[meeting.reportedBodyId];
   const chat = (meeting.messages || []).slice(-15).map((m) => `${m.senderName}${room.players[m.senderId] && room.players[m.senderId].isBot ? " (bot)" : ""}: ${m.text || stickerLabel(m.sticker)}`);
@@ -545,7 +545,7 @@ function tick(roomCode, room, now, api) {
         const mem = api.memoryOf(id);
         const hasNews = id === meeting.calledBy || mem.some((m) => m.kind === "kill" || m.kind === "body");
         bs.hasNews = hasNews;
-        const calm = !Object.values(room.players).some((p) => p.alive === false);
+        const calm = !Object.values(room.players).some((p) => p.alive === false && !p.spectator);
         // People with news speak first (they start "thinking" right away so
         // a slow AI reply still lands early); others chime in later or not at all.
         if ((room.botChatMode || "auto") === "mention") { bs.nextActAt = 0; bs.purpose = "chime"; } // @ only: wait to be tagged
@@ -561,7 +561,7 @@ function tick(roomCode, room, now, api) {
         else { bs.nextActAt = now + (chance(0.75) ? rand(9000, 30000) : rand(40000, 70000)); bs.purpose = "chime"; }
       }
     }
-    const calmMeeting = !Object.values(room.players).some((p) => p.alive === false);
+    const calmMeeting = !Object.values(room.players).some((p) => p.alive === false && !p.spectator);
     for (const id of botIds) {
       const bs = botState(st, id);
       // Deliver a message whose "typing" time is over.
@@ -660,7 +660,7 @@ function onChat(roomCode, room, message) {
   const isQuestion = /\?|\bkya\b|\bkaun\b|\bkon\b|\bwhere\b|\bwho\b|\bkahan\b|\bkidhar\b|कौन|कहाँ|क्या/.test(text);
   const now = Date.now();
   const mentionOnly = (room.botChatMode || "auto") === "mention";
-  const calm = !Object.values(room.players).some((p) => p.alive === false);
+  const calm = !Object.values(room.players).some((p) => p.alive === false && !p.spectator);
   for (const [id, p] of Object.entries(room.players)) {
     if (!p.isBot || p.alive === false || id === message.senderId) continue;
     const bs = botState(st, id);

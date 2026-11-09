@@ -1612,11 +1612,11 @@ function buildFullRestorePayload(room, playerData, socketId) {
       history: room.matchChat || [],
       meetingNo: room.meetingNo || 1,
       botChatMode: room.botChatMode || "auto",
-      deadPlayerNames: Object.values(room.players).filter((p) => !p.alive).map((p) => p.name),
+      deadPlayerNames: Object.values(room.players).filter((p) => !p.alive && !p.spectator).map((p) => p.name), // [WATCH MODE] a watching host never died
       calledBy: room.meeting.calledBy,
       liveVotes: room.meeting.votes || {}, // live votes are shown to everyone (voter avatar under target)
     } : null,
-    ghostChat: (playerData.alive === false) ? (room.ghostChat || []) : null,
+    ghostChat: (playerData.alive === false && !playerData.spectator) ? (room.ghostChat || []) : null, // [WATCH MODE] spectators aren't ghosts
     crewProgress: room.gameStarted ? computeCrewProgress(room.code) : null,
   };
 }
@@ -9159,7 +9159,7 @@ function startMeeting(roomCode, callerId, reason, reportedBodyId) {
   // exactly what Among Us does: calling a meeting reveals every death
   // that's happened so far, regardless of which one body triggered it.
   const deadPlayerNames = Object.values(room.players)
-    .filter((p) => !p.alive)
+    .filter((p) => !p.alive && !p.spectator) // [WATCH MODE] a watching host never died
     .map((p) => p.name);
 
   // [NEW FEATURE] Full details (name + avatar) of whichever specific
@@ -12510,7 +12510,7 @@ io.on("connection", (socket) => {
 
     const sender = room.players[socket.id];
     if (!sender) return;
-    if (sender.alive) {
+    if (sender.alive || sender.spectator) { // [WATCH MODE] a watching host isn't a ghost
       socket.emit("chatError", { message: "Only ghosts can use ghost chat." });
       return;
     }
@@ -12549,7 +12549,7 @@ io.on("connection", (socket) => {
     room.ghostChat.push(message);
 
     Object.entries(room.players).forEach(([id, p]) => {
-      if (!p.alive) io.to(id).emit("ghostChatMessageReceived", message);
+      if (!p.alive && !p.spectator) io.to(id).emit("ghostChatMessageReceived", message); // [WATCH MODE] not to a watching host
     });
   });
 
