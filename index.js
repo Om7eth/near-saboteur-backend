@@ -2556,8 +2556,12 @@ app.post("/auth/session", async (req, res) => {
 // an old browser tab's localStorage can't restore the session anymore.
 app.post("/auth/logout", async (req, res) => {
   try {
+    // [SECURITY FIX] Logout used to need only an email, so anyone could log
+    // any player out of every device just by knowing their email. Now the
+    // caller has to hold that account's current session token.
     const email = String(req.body.email || "").trim().toLowerCase();
-    const player = await Player.findOne({ email });
+    const sessionToken = String(req.body.sessionToken || "").trim();
+    const player = sessionToken ? await Player.findOne({ email, sessionToken }) : null;
     if (player) {
       player.sessionToken = null;
       player.sessionTokenExpiresAt = null;
@@ -7117,6 +7121,24 @@ function hasPlayPassForPlayerDoc(p) {
 // can't "double-dip" points from two simultaneous matches) and for
 // avoiding genuinely confusing state (which room's outcome should even
 // count for that account?).
+// [BUG FIX - DUPLICATE SEATS] A player whose connection dropped (phone killed
+// the browser, app reopened, new tab) and who comes back through JOIN rather
+// than the automatic reconnect used to get a second seat, while the old one
+// sat there as "(reconnecting...)" for the whole grace window. Same account,
+// same lobby -> the old disconnected seat is dropped first. Returns true if
+// that old seat was the host, so the new one can keep host power.
+function dropStaleSeatsForAccount(room, accountId, keepSocketId) {
+  if (!room || !accountId || room.gameStarted) return false;
+  let wasHost = false;
+  for (const [sid, p] of Object.entries(room.players)) {
+    if (sid !== keepSocketId && p.accountId === accountId && p.disconnectedAt) {
+      if (p.isHost) wasHost = true;
+      delete room.players[sid];
+    }
+  }
+  return wasHost;
+}
+
 function findActiveRoomForAccount(accountId) {
   if (!accountId) return null;
   for (const code of Object.keys(rooms)) {
@@ -9720,6 +9742,7 @@ io.on("connection", (socket) => {
     // confirming the target room exists, so a failed join attempt never
     // costs the player their current room membership.
     leaveCurrentRoomIfAny(io, socket);
+    const tookOverHost = account ? dropStaleSeatsForAccount(room, account.accountId, socket.id) : false;
 
     const playerToken = generatePlayerToken();
     // [AVATAR UNIQUENESS] Server-side enforcement — the client already
@@ -9736,7 +9759,7 @@ io.on("connection", (socket) => {
       const allAvatarIds = ["purple", "green", "red", "black", "darkgreen", "magenta", "yellow", "brown", "orange", "cyan"];
       finalAvatarId = allAvatarIds.find((id) => !takenAvatarIds.has(id)) || avatarId;
     }
-    room.players[socket.id] = { name, avatarId: finalAvatarId, isHost: false, playerToken, accountId: account?.accountId || null, accountEmail: account?.accountEmail || null, accountUsername: account?.accountUsername || null, hasLegionBadge: !!account?.hasLegionBadge, hasPlayPass: !!account?.hasPlayPass, premiumVariantId: account?.activePremiumAvatarVariant || null, avatarVariantId: resolveAvatarVariantForRoom(account, finalAvatarId) };
+    room.players[socket.id] = { name, avatarId: finalAvatarId, isHost: tookOverHost, playerToken, accountId: account?.accountId || null, accountEmail: account?.accountEmail || null, accountUsername: account?.accountUsername || null, hasLegionBadge: !!account?.hasLegionBadge, hasPlayPass: !!account?.hasPlayPass, premiumVariantId: account?.activePremiumAvatarVariant || null, avatarVariantId: resolveAvatarVariantForRoom(account, finalAvatarId) };
     bots.resolveNameClash(room); // [$SABOTEUR] a person's name wins over a bot's
     // [HOST RETURNS TO CREATOR] If this is the account that originally
     // created the room rejoining after having left, they get host power
@@ -9951,6 +9974,7 @@ io.on("connection", (socket) => {
       io.to(reqRec.socketId).emit("joinRequestRejected", { code: roomCode, message: "The match started before you were approved." });
       return;
     }
+    const approvedTookHost = dropStaleSeatsForAccount(room, reqRec.accountId, reqRec.socketId); // [BUG FIX - DUPLICATE SEATS]
     const MAX_PLAYERS = 10;
     if (Object.keys(room.players).length >= MAX_PLAYERS) {
       io.to(reqRec.socketId).emit("joinRequestRejected", { code: roomCode, message: "The room filled up before you were approved." });
@@ -9965,7 +9989,7 @@ io.on("connection", (socket) => {
       finalAvatarId = allAvatarIds.find((id) => !takenAvatarIds.has(id)) || finalAvatarId;
     }
     room.players[reqRec.socketId] = {
-      name: reqRec.name, avatarId: finalAvatarId, isHost: false, playerToken,
+      name: reqRec.name, avatarId: finalAvatarId, isHost: approvedTookHost, playerToken,
       accountId: reqRec.accountId, accountEmail: reqRec.accountEmail,
       accountUsername: reqRec.accountUsername, hasLegionBadge: reqRec.hasLegionBadge,
       hasPlayPass: !!reqRec.hasPlayPass, premiumVariantId: reqRec.activePremiumAvatarVariant || null,
