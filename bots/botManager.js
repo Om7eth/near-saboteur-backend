@@ -826,6 +826,7 @@ function init({ io, rooms }) {
 }
 
 module.exports = {
+  spawnPointPx, // [SPAWN] the server also places human players on their spawn at match start
   onMatchEnd,
   resolveNameClash,
   BOT_NAMES,

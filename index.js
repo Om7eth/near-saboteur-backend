@@ -11872,6 +11872,12 @@ io.on("connection", (socket) => {
       const role = saboteurIds.has(id) ? "saboteur" : "crewmate";
       room.players[id].role = role;
       room.players[id].alive = true; delete room.players[id].ejected;
+      // [STUCK-OUTSIDE-MAP FIX] Put everyone on their spawn point on the server
+      // too. Before, the server kept each player's LOBBY position until their
+      // app sent a new one - a player whose connection blipped at the start
+      // got that lobby position back on reconnect, which is the empty void at
+      // the station's top-left, and was stuck there.
+      { const sp = bots.spawnPointPx(spawnIndex); room.players[id].x = sp.x; room.players[id].y = sp.y; }
       // [NEW FEATURE] Task-reminder tracking - crewmates only (a
       // Saboteur has no missions to be reminded about). Reset fresh
       // every game. See the inactivity-check interval near the bottom
@@ -11916,6 +11922,7 @@ io.on("connection", (socket) => {
     spectatorIds.forEach((id, k) => {
       const sp = room.players[id];
       sp.role = "spectator"; sp.alive = false;
+      { const pos = bots.spawnPointPx(playerIds.length + k); sp.x = pos.x; sp.y = pos.y; } // [STUCK-OUTSIDE-MAP FIX]
       io.to(id).emit("roleAssigned", { role: "spectator", spectator: true, spawnIndex: playerIds.length + k, speedLevel: clampedSpeedLevel, alive: false, saboteurCount, mapVersion: bots.MAP_VERSION, matchId: room.currentMatchId || null, onChainPoolId: room.pool?.onChainPoolId || null, bonusMission: null });
     });
     bots.onGameStarted(roomCode, room, playerIds);
