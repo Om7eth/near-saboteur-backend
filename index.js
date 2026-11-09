@@ -2896,6 +2896,7 @@ const KLIPY_API_KEY = process.env.KLIPY_API_KEY || "";
 // for tracking pixels, phishing, or worse). Only accepts a plausible
 // https image/gif URL shape; anything else is silently dropped (the
 // message still sends as text-only if there was any text alongside it).
+const { validateSticker } = require("./stickers"); // [PLAY PASS - STICKERS]
 function validateGifUrl(url) {
   if (typeof url !== "string") return null;
   if (!/^https:\/\/.+\.(gif|webp|png|jpe?g)(\?.*)?$/i.test(url) || url.length > 500) return null;
@@ -5484,7 +5485,7 @@ app.post("/play-pass/purchase-mainnet", async (req, res) => {
     await player.save();
     sendInboxMessage(player._id, {
       title: "Play Pass activated!",
-      body: `Thanks! ${amountNear} NEAR received from ${payer}. Your premium skins, GIFs, gold name and 2x $SABOTEUR rewards are on. Purchases are final once Play Pass is active.`,
+      body: `Thanks! ${amountNear} NEAR received from ${payer}. Your premium skins, 24 chat stickers, GIFs, gold name and 2x $SABOTEUR rewards are on. Purchases are final once Play Pass is active.`,
       nameTag: "Play Pass",
     });
     logAdminAction("play-pass-purchased", { playerId: base.playerId, playerName: base.playerName, txHash, amountNear, payer });
@@ -8996,7 +8997,7 @@ function startMeeting(roomCode, callerId, reason, reportedBodyId) {
 // [AI BOTS] Extracted from sendChatMessage so bots post meeting chat
 // under the same rules (alive, 200 chars). Returns the stored message, or
 // { message } (an error object without senderId) on failure.
-function postMeetingChat(roomCode, senderId, text, replyTo, gifUrl) {
+function postMeetingChat(roomCode, senderId, text, replyTo, gifUrl, sticker) {
   const room = rooms[roomCode];
   if (!room || !room.meeting) return { message: "No meeting in progress." };
 
@@ -9021,7 +9022,9 @@ function postMeetingChat(roomCode, senderId, text, replyTo, gifUrl) {
   // regardless of what the client sent (the UI already locks this, but
   // never trust the client alone for a gated feature).
   const safeGifUrl = sender.hasPlayPass ? validateGifUrl(gifUrl) : null;
-  if (!trimmed && !safeGifUrl) return { message: "Empty message." };
+  // [PLAY PASS - STICKERS] same rule: only known ids, only Play Pass holders.
+  const safeSticker = sender.hasPlayPass ? validateSticker(sticker) : null;
+  if (!trimmed && !safeGifUrl && !safeSticker) return { message: "Empty message." };
 
   const message = {
     senderId: senderId,
@@ -9037,6 +9040,7 @@ function postMeetingChat(roomCode, senderId, text, replyTo, gifUrl) {
     senderHasLegionBadge: !!sender.hasLegionBadge,
     text: trimmed,
     gifUrl: safeGifUrl,
+    sticker: safeSticker,
     timestamp: Date.now(),
     // [NEW FEATURE] WhatsApp/Telegram-style reply — only the small bits
     // needed to render a reply preview are kept, never the client's
@@ -12210,8 +12214,8 @@ io.on("connection", (socket) => {
   // Client sends: { text }
   // [MULTIPLAYER: SHARED] - every player's chat history should show the
   // same messages, so the server is the single source of truth here.
-  socket.on("sendChatMessage", ({ text, replyTo, gifUrl }) => {
-    const res = postMeetingChat(socket.data.roomCode, socket.id, text, replyTo, gifUrl);
+  socket.on("sendChatMessage", ({ text, replyTo, gifUrl, sticker }) => {
+    const res = postMeetingChat(socket.data.roomCode, socket.id, text, replyTo, gifUrl, sticker);
     if (res && !res.senderId && res.message === "You are a ghost and cannot send chat messages.") socket.emit("chatError", res);
   });
 
@@ -12222,7 +12226,7 @@ io.on("connection", (socket) => {
   // what makes it structurally impossible for an alive player to ever
   // see a ghost chat message, regardless of any client-side bug, since
   // their socket is simply never one of the targets in the first place.
-  socket.on("sendGhostChatMessage", ({ text, replyTo, gifUrl }) => {
+  socket.on("sendGhostChatMessage", ({ text, replyTo, gifUrl, sticker }) => {
     const roomCode = socket.data.roomCode;
     const room = rooms[roomCode];
     if (!room || !room.gameStarted) return;
@@ -12240,7 +12244,8 @@ io.on("connection", (socket) => {
     // regardless of what the client sent (the UI already locks this, but
     // never trust the client alone for a gated feature).
     const safeGifUrl = sender.hasPlayPass ? validateGifUrl(gifUrl) : null;
-    if (!trimmed && !safeGifUrl) return;
+    const safeSticker = sender.hasPlayPass ? validateSticker(sticker) : null; // [PLAY PASS - STICKERS]
+    if (!trimmed && !safeGifUrl && !safeSticker) return;
 
     const message = {
       senderId: socket.id,
@@ -12256,6 +12261,7 @@ io.on("connection", (socket) => {
       senderHasLegionBadge: !!sender.hasLegionBadge,
       text: trimmed,
       gifUrl: safeGifUrl,
+      sticker: safeSticker,
       timestamp: Date.now(),
       replyTo: (replyTo && replyTo.senderName && replyTo.text)
         ? { senderName: String(replyTo.senderName).slice(0, 40), text: String(replyTo.text).slice(0, 200) }
@@ -12275,7 +12281,7 @@ io.on("connection", (socket) => {
   // sendGhostChatMessage above, just scoped to the Lobby instead of
   // ghosts-only - only usable while !room.gameStarted, and broadcasts to
   // every player currently in the room (not a filtered subset).
-  socket.on("sendLobbyChatMessage", ({ text, replyTo, gifUrl }) => {
+  socket.on("sendLobbyChatMessage", ({ text, replyTo, gifUrl, sticker }) => {
     const roomCode = socket.data.roomCode;
     const room = rooms[roomCode];
     if (!room) return;
@@ -12293,7 +12299,8 @@ io.on("connection", (socket) => {
     // regardless of what the client sent (the UI already locks this, but
     // never trust the client alone for a gated feature).
     const safeGifUrl = sender.hasPlayPass ? validateGifUrl(gifUrl) : null;
-    if (!trimmed && !safeGifUrl) return;
+    const safeSticker = sender.hasPlayPass ? validateSticker(sticker) : null; // [PLAY PASS - STICKERS]
+    if (!trimmed && !safeGifUrl && !safeSticker) return;
 
     const message = {
       id: `${socket.id}-${Date.now()}`,
@@ -12310,6 +12317,7 @@ io.on("connection", (socket) => {
       senderHasLegionBadge: !!sender.hasLegionBadge,
       text: trimmed,
       gifUrl: safeGifUrl,
+      sticker: safeSticker,
       timestamp: Date.now(),
       replyTo: (replyTo && replyTo.senderName && replyTo.text)
         ? { senderName: String(replyTo.senderName).slice(0, 40), text: String(replyTo.text).slice(0, 200) }

@@ -30,6 +30,7 @@
 // of the day. Credits can be topped up on cloud.near.ai, including via
 // NEAR AI's stake-to-compute (staking yield turned into credits).
 // ============================================================
+const { stickerLabel } = require("../stickers"); // [PLAY PASS - STICKERS] bots read stickers as text
 const B = require("./brain");
 const FC = require("./fallbackChat");
 const { RULES: ECON_RULES } = require("../economy/rules");
@@ -180,7 +181,7 @@ function buildContext(room, botId, memory, now) {
   const dead = Object.entries(room.players).filter(([, p]) => p.alive === false);
   const caller = room.players[meeting.calledBy];
   const body = meeting.reportedBodyId && room.players[meeting.reportedBodyId];
-  const chat = (meeting.messages || []).slice(-15).map((m) => `${m.senderName}${room.players[m.senderId] && room.players[m.senderId].isBot ? " (bot)" : ""}: ${m.text}`);
+  const chat = (meeting.messages || []).slice(-15).map((m) => `${m.senderName}${room.players[m.senderId] && room.players[m.senderId].isBot ? " (bot)" : ""}: ${m.text || stickerLabel(m.sticker)}`);
   // [MEMORY] what people said in EARLIER meetings of THIS match (never other matches)
   const earlier = [];
   let mNo = 0;
