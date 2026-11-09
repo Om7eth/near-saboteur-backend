@@ -8271,7 +8271,7 @@ function checkWinCondition(roomCode, force = false) {
   // no Saboteur left in the game at all to claim that win.
   if (aliveCrewmates.length < 2 && aliveSaboteurs.length > 0) {
     room.winner = "saboteur";
-    stagePendingPointsForRoom(room); // [POINTS SYSTEM STEP 2] must happen now, before gameOver - see the comment on stagePendingPointsForRoom
+    stagePendingPointsForRoom(room); bots.onMatchEnd(roomCode, room); // [AI BOTS] learn from the match // [POINTS SYSTEM STEP 2] must happen now, before gameOver - see the comment on stagePendingPointsForRoom
     economy.settleMatch({ io, roomCode, room, computePoints: computeMatchPoints, hasDb: !!MONGODB_URI }); // [$SABOTEUR] rank rewards
     io.to(roomCode).emit("gameOver", { winner: "saboteur", reason: "elimination", saboteurReveal: buildSaboteurReveal(room) });
     console.log(`Room ${roomCode}: Saboteur(s) win by elimination`);
@@ -8291,7 +8291,7 @@ function checkWinCondition(roomCode, force = false) {
   // true after roles have actually been assigned.
   if (room.gameStarted && aliveSaboteurs.length === 0) {
     room.winner = "crewmate";
-    stagePendingPointsForRoom(room); // [POINTS SYSTEM STEP 2]
+    stagePendingPointsForRoom(room); bots.onMatchEnd(roomCode, room); // [AI BOTS] learn from the match // [POINTS SYSTEM STEP 2]
     economy.settleMatch({ io, roomCode, room, computePoints: computeMatchPoints, hasDb: !!MONGODB_URI }); // [$SABOTEUR] rank rewards
     io.to(roomCode).emit("gameOver", { winner: "crewmate", reason: "saboteurEjected", saboteurReveal: buildSaboteurReveal(room) });
     console.log(`Room ${roomCode}: Crewmates win - Saboteur ejected`);
@@ -8327,7 +8327,7 @@ function checkWinCondition(roomCode, force = false) {
     departedCrewmates.every((d) => d.missionsDone >= (d.missionsTotal || Infinity));
   if ((allCrewmates.length > 0 || departedCrewmates.length > 0) && everyoneDone) {
     room.winner = "crewmate";
-    stagePendingPointsForRoom(room); // [POINTS SYSTEM STEP 2]
+    stagePendingPointsForRoom(room); bots.onMatchEnd(roomCode, room); // [AI BOTS] learn from the match // [POINTS SYSTEM STEP 2]
     economy.settleMatch({ io, roomCode, room, computePoints: computeMatchPoints, hasDb: !!MONGODB_URI }); // [$SABOTEUR] rank rewards
     io.to(roomCode).emit("gameOver", { winner: "crewmate", reason: "missionsComplete", saboteurReveal: buildSaboteurReveal(room) });
     console.log(`Room ${roomCode}: Crewmates win - all missions complete`);

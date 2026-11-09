@@ -808,6 +808,10 @@ function onMeetingChat(roomCode, message) {
   const room = ctx && ctx.rooms[roomCode];
   if (room) { try { MB.onChat(roomCode, room, message); } catch (e) { console.error("[BOTS] onChat error:", e.message); } }
 }
+// [SELF-IMPROVEMENT] called once when a match ends (before its chat is cleared)
+function onMatchEnd(roomCode, room) {
+  if (room) MB.learnFromMatch(room).catch(() => {});
+}
 function memoryOf(botId) {
   const b = brains.get(botId);
   return b && b.memory ? b.memory.slice() : [];
@@ -822,6 +826,7 @@ function init({ io, rooms }) {
 }
 
 module.exports = {
+  onMatchEnd,
   resolveNameClash,
   BOT_NAMES,
   MAP_VERSION,

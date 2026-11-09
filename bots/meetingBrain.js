@@ -33,6 +33,7 @@
 const B = require("./brain");
 const FC = require("./fallbackChat");
 const { RULES: ECON_RULES } = require("../economy/rules");
+const LESSONS = require("./lessons");
 
 const API_KEY = process.env.NEAR_AI_API_KEY || "";
 const MODEL = process.env.NEAR_AI_MODEL || "Qwen/Qwen3.6-35B-A3B-FP8";
@@ -65,7 +66,9 @@ if (API_KEY) {
   }).catch(() => { /* keep defaults */ });
 }
 const MAX_MSGS_PER_BOT = 4;
-const MIN_GAP_BETWEEN_BOT_MSGS_MS = 2500;
+const MIN_GAP_BETWEEN_BOT_MSGS_MS = 4000; // [HUMAN PACE] bots don't fire back-to-back
+// [HUMAN PACE] a person reads (~2-4s), thinks, then types ~5 chars/sec on a phone
+const humanTypingMs = (text) => Math.max(3500, Math.min(16000, 1800 + String(text || '').length * 170));
 const MAX_AI_CALLS_PER_MINUTE = 60; // global safety cap on spend
 
 const rooms = new Map(); // roomCode -> meeting state
@@ -178,6 +181,13 @@ function buildContext(room, botId, memory, now) {
   const caller = room.players[meeting.calledBy];
   const body = meeting.reportedBodyId && room.players[meeting.reportedBodyId];
   const chat = (meeting.messages || []).slice(-15).map((m) => `${m.senderName}${room.players[m.senderId] && room.players[m.senderId].isBot ? " (bot)" : ""}: ${m.text}`);
+  // [MEMORY] what people said in EARLIER meetings of THIS match (never other matches)
+  const earlier = [];
+  let mNo = 0;
+  for (const e of room.matchChat || []) {
+    if (e.kind === "sep") { mNo = e.meetingNo || mNo + 1; if (mNo >= (room.meetingNo || 0)) break; earlier.push(`-- meeting ${mNo}: ${e.bodyName ? `${e.callerName} reported ${e.bodyName}'s body` : `${e.callerName} called it`} --`); }
+    else if (e.kind === "msg" && e.text && mNo && mNo < (room.meetingNo || 0)) earlier.push(`${e.senderName}${room.players[e.senderId] && room.players[e.senderId].isBot ? " (bot)" : ""}: ${String(e.text).slice(0, 140)}`);
+  }
   const humanTexts = (meeting.messages || []).filter((m) => room.players[m.senderId] && !room.players[m.senderId].isBot).map((m) => m.text);
   const teammates = isSab ? alive.filter(([id, p]) => id !== botId && p.role === "saboteur").map(([, p]) => p.name) : [];
   // [REALISM] A meeting with no deaths at all has nothing to solve: real
@@ -186,10 +196,37 @@ function buildContext(room, botId, memory, now) {
   const callerIsHuman = !!(caller && !caller.isBot);
   return {
     me, isSab, alive, dead, caller, body, chat, humanTexts, teammates, noDeaths, callerIsHuman,
+    earlier: earlier.slice(-16),
+    evidence: isSab ? [] : evidenceLines(room, botId, memory, now),
+    lessons: LESSONS.cached(isSab ? "saboteur" : "crew"),
     language: detectLanguage(humanTexts),
     memory: memoryLines(memory, now, isSab),
     reason: meeting.reason === "report" ? `${caller ? caller.name : "Someone"} reported ${body ? body.name + "'s" : "a"} dead body${body && typeof body.bodyX === "number" ? " in " + B.roomNameAt(body.bodyX, body.bodyY) : ""}` : `${caller ? caller.name : "Someone"} called an emergency meeting`,
   };
+}
+
+// [THINK LIKE A PLAYER] Work the evidence out in code, so the model can't
+// miss it: who this bot saw where a body turned up, and who the humans have
+// been accusing across this match's meetings.
+const ACCUSE_WORDS = /\b(sus|saw|dekha|bhaga|kill|killed|maara|mara|pakka|vote|lying|jhooth|body ke paas|near the body)\b/i;
+function evidenceLines(room, botId, memory, now) {
+  const out = [];
+  const alive = Object.entries(room.players).filter(([id, p]) => p.alive !== false && id !== botId);
+  // 1) I saw someone in the room where a body was found, shortly before it was found
+  for (const b of memory.filter((m) => m.kind === "body")) {
+    const near = memory.filter((m) => m.kind === "saw" && m.where === b.where && m.t <= b.t && b.t - m.t < 60000 && alive.some(([, p]) => p.name === m.name));
+    for (const n of near.slice(-2)) out.push(`YOU saw ${n.name} in ${b.where} shortly before ${b.name}'s body was found there. That makes ${n.name} suspicious - it SUPPORTS anyone accusing ${n.name}. It is NOT an alibi.`);
+  }
+  for (const k of memory.filter((m) => m.kind === "kill")) out.push(`YOU SAW ${k.name} kill ${k.victim}. Say it and vote ${k.name}.`);
+  // 2) who the humans accused this match (all meetings), and how often
+  const counts = {};
+  for (const e of [...(room.matchChat || []).filter((x) => x.kind === "msg"), ...((room.meeting && room.meeting.messages) || [])]) {
+    const sender = room.players[e.senderId];
+    if (!sender || sender.isBot || !e.text || !ACCUSE_WORDS.test(e.text)) continue;
+    for (const [, p] of alive) if (p !== sender && new RegExp(`\\b${p.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(e.text)) { const k = `${sender.name}->${p.name}`; counts[k] = (counts[k] || 0) + 1; }
+  }
+  for (const [k, n] of Object.entries(counts)) { const [a, t] = k.split("->"); out.push(`${a} has accused ${t}${n > 1 ? ` ${n} times this match` : ""}${n > 1 ? " - repeated, consistent accusations are worth taking seriously" : ""}.`); }
+  return out.slice(0, 6);
 }
 
 const PERSONAS = [
@@ -212,7 +249,12 @@ function systemPrompt(ctx) {
       : "Reply in the same language and style the human players use in the chat (if nobody has written yet, use simple casual English).";
   const role = ctx.isSab
     ? `You are secretly the SABOTEUR${ctx.teammates.length ? ` (your fellow saboteur: ${ctx.teammates.join(", ")})` : ""}. Never admit it. Stay calm, give a believable alibi from what you "did", and if useful cast doubt on someone else - but don't overdo it, and never contradict facts everyone saw. Don't vote for your teammate.`
-    : "You are CREW. Tell the truth about what you remember. You may be unsure - say so. If you saw a kill, say it clearly. Only call someone suspicious if you saw a kill, found a body right where they were, or they clearly lied in the chat. Otherwise ask questions or vote skip.";
+    : [
+      "You are CREW. Tell the truth about what you remember. You may be unsure - say so. If you saw a kill, say it clearly.",
+      "THINK LIKE A REAL PLAYER: a player saying they SAW someone kill, or run from / stand over a body, IS evidence - in this game eyewitness testimony is the only proof anyone ever has. Don't keep demanding \"proof\". Check it against your own memory: if nothing you remember contradicts it, say you believe them and vote that person. If your memory DOES contradict it (you saw the accused somewhere else at that moment), say so plainly.",
+      "Weigh who is consistent: someone who accused the same person in an earlier meeting and now there's another body is MORE believable; someone who only deflects (\"prove it\", \"you're sus for reporting\") without giving their own alibi is LESS believable.",
+      "Change your mind when someone gives new information. Don't call someone sus just for reporting a body.",
+    ].join(" ");
   return [
     `You are "${ctx.me.name}", a player in NEAR Saboteur, a social deduction game: crew do missions on a space station, one or two hidden saboteurs kill people. Everyone is now in a meeting to discuss and vote someone out.`,
     "Your name is shown with a BOT tag, so everyone knows you are an AI bot. If asked, admit you're a bot - but you still play to win like anyone else.",
@@ -220,6 +262,7 @@ function systemPrompt(ctx) {
     `Personality: ${personaFor(ctx.me.name)}.`,
     "HONESTY RULES (most important): only mention things that are in \"What you remember\" or in the chat. Never invent sightings, camera footage, movements, lies or events. If you don't know, say you don't know. Being in a room with others, walking around, being seen on cameras or doing missions is NORMAL - it is never evidence on its own.",
     "Don't start long back-and-forth arguments with other bots; talk to the humans, and keep it short.",
+    ctx.lessons && ctx.lessons.length ? `General tips learned from many past games (use them to play better; NEVER mention past games, other players, or that you learned anything): ${ctx.lessons.map((l) => `- ${l}`).join(" ")}` : "",
     "Write like a real player in a fast game chat: ONE short message (max ~18 words), no lists, no narration, no quotes, react to what others just said, use player names. It's fine to stay silent if you have nothing useful.",
     "Never quote exact times or seconds from your memory (no \"44s\"); say it like a person would: \"just now\", \"a bit before\", \"earlier\" (or the same in the chat's language).",
     lang,
@@ -244,6 +287,12 @@ function userPrompt(ctx, alreadySaid, trigger, othersSaid) {
     `Alive: ${ctx.alive.map(([, p]) => p.name + (p === ctx.me ? " (you)" : "")).join(", ")}.`,
     ctx.dead.length ? `Dead: ${ctx.dead.map(([, p]) => p.name).join(", ")}.` : "Nobody else is dead.",
     "",
+    ctx.earlier && ctx.earlier.length ? "Earlier meetings in THIS match (what people said):" : "",
+    ...(ctx.earlier && ctx.earlier.length ? ctx.earlier : []),
+    ctx.earlier && ctx.earlier.length ? "" : "",
+    ctx.evidence && ctx.evidence.length ? "EVIDENCE CHECK (worked out for you - trust this over your own guess):" : "",
+    ...(ctx.evidence && ctx.evidence.length ? ctx.evidence.map((l) => `- ${l}`) : []),
+    ctx.evidence && ctx.evidence.length ? "" : "",
     "What you remember (only you know this):",
     ...(ctx.memory.length ? ctx.memory : ["(nothing notable - you were doing your own thing)"]),
     "",
@@ -365,7 +414,9 @@ async function think(room, roomCode, botId, memory, bs, now, st, purpose) {
     say = (calm.say || "").trim();
   }
   // People don't quote seconds ("30s ago") - the prompt says so, enforce it.
-  say = say.replace(/\b\d+\s?(s|sec|secs|seconds?)\s+ago\b/gi, ctx.language === "english" ? "a bit ago" : "thodi der pehle")
+  say = say.replace(/\b\d+\s?m\s?\d+\s?s\s+ago\b/gi, ctx.language === "english" ? "a bit ago" : "thodi der pehle")
+    .replace(/\b\d+\s?(s|sec|secs|seconds?|min|mins|minute)\s+(pehle|pahle|before)\b/gi, ctx.language === "english" ? "a bit before" : "thodi der pehle")
+    .replace(/\b\d+\s?(s|sec|secs|seconds?)\s+ago\b/gi, ctx.language === "english" ? "a bit ago" : "thodi der pehle")
     .replace(/\b\d+\s?(m|min|mins|minutes?)\s+ago\b/gi, ctx.language === "english" ? "earlier" : "pehle");
   // [REALISM] "I'll stay silent" is not a chat message - just stay silent.
   if (/\b(stay(ing)? (silent|quiet)|nothing to add|chup rahunga)\b/i.test(say)) say = "";
@@ -462,7 +513,7 @@ function tick(roomCode, room, now, api) {
       const mem = api.memoryOf(id);
       const startedAt = Date.now();
       // Slow AI while someone is waiting on us: say a quick filler first.
-      const filler = purpose === "reply" && !bs.usedFiller ? setTimeout(() => {
+      const filler = purpose === "reply" && !bs.usedFiller && chance(0.5) ? setTimeout(() => {
         if (!bs.busy || room.meeting !== st.meetingRef || meeting.stage !== "chat") return;
         bs.usedFiller = true;
         const lang = detectLanguage((meeting.messages || []).filter((m) => room.players[m.senderId] && !room.players[m.senderId].isBot).map((m) => m.text));
@@ -477,8 +528,9 @@ function tick(roomCode, room, now, api) {
         bs.vote = vote;
         if (say && (room.meeting.stage === "chat" || room.meeting.stage === "voting")) {
           // If the AI was slow, "type" faster - the thinking time already passed.
-          const typingMs = Math.min(7000, 1200 + say.length * 45) * (Date.now() - startedAt > 3000 ? 0.4 : 1);
-          bs.pendingSay = { text: say, at: Math.max(Date.now() + typingMs, bs.notBefore || 0) };
+          // [HUMAN PACE] the clock started when the bot "read" the chat; AI think-time counts toward it
+          const typingMs = humanTypingMs(say);
+          bs.pendingSay = { text: say, at: Math.max(startedAt + typingMs, Date.now() + 1200, bs.notBefore || 0) };
           if (api.emitTyping) api.emitTyping(roomCode, id, Math.max(800, bs.pendingSay.at - Date.now()));
           console.log(`[BOTS-AI] ${room.players[id] && room.players[id].name} (${source}): "${say}" -> vote ${vote === "skip" ? "skip" : (room.players[vote] || {}).name}`);
         }
@@ -544,14 +596,50 @@ function onChat(roomCode, room, message) {
       bs.mentioned = true;
       bs.purpose = "reply";
       bs.trigger = { text: message.text || "", fromName: message.senderName };
-      bs.nextActAt = now + rand(1500, 4000);
+      bs.nextActAt = now + rand(2500, 5500); // [HUMAN PACE] read + think before typing
     } else if (!fromBot && (isQuestion ? chance(0.45) : chance(0.25))) {
       bs.trigger = { text: message.text || "", fromName: message.senderName };
-      if (!bs.nextActAt || bs.nextActAt > now + 12000) bs.nextActAt = now + rand(4000, 11000);
+      if (!bs.nextActAt || bs.nextActAt > now + 14000) bs.nextActAt = now + rand(5000, 13000);
     } else if (fromBot && chance(0.12)) {
       if (!bs.nextActAt) bs.nextActAt = now + rand(6000, 14000);
     }
   }
+}
+
+// [SELF-IMPROVEMENT] After a match: turn the meeting chat + the truth into a
+// couple of general tips (see lessons.js). One AI call per match, only when
+// humans actually talked.
+async function learnFromMatch(room) {
+  try {
+    const msgs = (room.matchChat || []).filter((e) => e.kind === "msg" && e.text);
+    const humanMsgs = msgs.filter((e) => room.players[e.senderId] && !room.players[e.senderId].isBot);
+    const hasBots = Object.values(room.players).some((p) => p.isBot);
+    if (!hasBots || humanMsgs.length < 3 || !room.winner || room.winner === "devEnded") return;
+    if (!aiAllowed(null)) return;
+    const sabs = Object.values(room.players).filter((p) => p.role === "saboteur").map((p) => p.name);
+    const transcript = (room.matchChat || []).filter((e) => e.kind === "msg" || e.kind === "sep").slice(-80)
+      .map((e) => e.kind === "sep" ? `-- meeting ${e.meetingNo}: ${e.bodyName ? `${e.callerName} reported ${e.bodyName}` : `${e.callerName} called it`} --` : `${e.senderName}${room.players[e.senderId] && room.players[e.senderId].isBot ? " (bot)" : ""}: ${String(e.text).slice(0, 160)}`).join("\n");
+    const system = "You coach AI players of a social deduction game (crew vs hidden saboteurs; meetings to discuss and vote). Read one finished game and write short GENERAL lessons that would make the AI players think and talk more like good human players next time. Rules: no player names, no room names, no numbers, no specific events - only reusable advice, max 22 words each. Answer only JSON: {\"crew\": [\"...\"], \"saboteur\": [\"...\"]} with 0-2 items each. Skip anything obvious or already standard.";
+    // Ground truth the coach must learn from: who accused whom, and were they right?
+    const sabSet = new Set(sabs.map((n) => n.toLowerCase()));
+    const verdicts = [];
+    for (const e of msgs) {
+      const sender = room.players[e.senderId];
+      if (!sender || !ACCUSE_WORDS.test(e.text)) continue;
+      for (const p of Object.values(room.players)) {
+        if (p === sender || !new RegExp(`\\b${p.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(e.text)) continue;
+        const v = `${sender.name}${sender.isBot ? " (bot)" : ""} accused ${p.name} -> ${sabSet.has(p.name.toLowerCase()) ? "RIGHT, " + p.name + " WAS a saboteur" : "WRONG, " + p.name + " was crew"}`;
+        if (!verdicts.includes(v)) verdicts.push(v);
+      }
+    }
+    const lost = room.winner === "saboteur" ? "crew" : "saboteur";
+    const user = `TRUTH: the saboteur${sabs.length > 1 ? "s were" : " was"} ${sabs.join(", ")}. ${room.winner === "saboteur" ? "SABOTEURS WON - the crew lost." : "CREW WON - the saboteurs lost."}\n${verdicts.length ? `Accusations and whether they were right:\n${verdicts.join("\n")}\n` : ""}\nMeeting chat:\n${transcript}\n\nUsing the truth above (not how convincing people sounded): what mistakes did the ${lost} side's AI bots make, and what did the winners do well? Write lessons that would make the AI crew catch saboteurs more often and the AI saboteurs blend in better. If a correct accusation was ignored, the crew lesson must be about trusting that kind of testimony - never the opposite.`;
+    const out = await callNearAI(system, user);
+    const banned = [...Object.values(room.players).map((p) => p.name), ...Object.values(B.ROOM_NAME || {}), "near", "ironclaw", "legion"];
+    const a = await LESSONS.save("crew", Array.isArray(out.crew) ? out.crew : [], banned);
+    const b = await LESSONS.save("saboteur", Array.isArray(out.saboteur) ? out.saboteur : [], banned);
+    if (a || b) console.log(`[BOTS-LEARN] saved ${a} crew + ${b} saboteur tip(s) from a finished match`);
+  } catch (e) { console.warn("[BOTS-LEARN] skipped:", e.message); }
 }
 
 function aiStats() { rollDay(); return { ...stats, spendUsd: Math.round(stats.spendUsd * 10000) / 10000, budgetUsd: DAILY_BUDGET_USD, model: API_KEY ? MODEL : null }; }
@@ -559,4 +647,4 @@ function aiStatus() {
   return API_KEY ? `NEAR AI Cloud (${MODEL})` : "rule-based fallback (set NEAR_AI_API_KEY to use NEAR AI Cloud)";
 }
 
-module.exports = { tick, onChat, aiStatus, aiStats, detectLanguage, _internal: { fallbackThink, buildContext, systemPrompt, userPrompt, memoryLines } };
+module.exports = { tick, onChat, aiStatus, aiStats, detectLanguage, learnFromMatch, _internal: { fallbackThink, buildContext, systemPrompt, userPrompt, memoryLines } };
