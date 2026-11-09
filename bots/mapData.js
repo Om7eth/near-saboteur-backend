@@ -182,7 +182,7 @@ const MISSION_DEFS = [
   { room: 'upper_eng', label: '📈 Stake NEAR' },
   { room: 'lower_eng', label: '🎁 Claim Rewards' },
   { room: 'electrical', label: '⚡ Repair Power Grid' },
-  { room: 'storage', label: '🤖 Ask NEAR AI 4 Questions' },
+  { room: 'storage', label: '🤖 Ask NEAR AI 3 Questions' },
   { room: 'comms', label: '🛒 Buy Merch' },
   { room: 'o2', label: '🚀 Deploy AI Agent' },
   { room: 'admin', label: '🏛️ NEAR Legion' },

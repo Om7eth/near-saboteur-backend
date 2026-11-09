@@ -5431,6 +5431,15 @@ app.post("/play-pass/link-wallet", async (req, res) => {
   }
 });
 
+// [NEAR AI MISSION] Storage-room mission: real NEAR AI answers, auto-reply
+// when NEAR AI isn't available. No login needed (guests play missions too).
+const nearAiMission = require("./nearAiMission");
+app.post("/near-ai/mission-ask", async (req, res) => {
+  const ip = String(req.headers["x-forwarded-for"] || req.socket.remoteAddress || "").split(",")[0].trim();
+  const r = await nearAiMission.ask(ip, req.body && req.body.question, req.body && req.body.history);
+  res.status(r.status).json(r.body);
+});
+
 app.post("/play-pass/purchase-mainnet", async (req, res) => {
   try {
     const sessionToken = String(req.body.sessionToken || "").trim();
