@@ -198,6 +198,7 @@ function buildContext(room, botId, memory, now) {
     me, isSab, alive, dead, caller, body, chat, humanTexts, teammates, noDeaths, callerIsHuman,
     earlier: earlier.slice(-16),
     evidence: isSab ? [] : evidenceLines(room, botId, memory, now),
+    read: isSab ? null : evidenceLines.last,
     lessons: LESSONS.cached(isSab ? "saboteur" : "crew"),
     language: detectLanguage(humanTexts),
     memory: memoryLines(memory, now, isSab),
@@ -205,28 +206,94 @@ function buildContext(room, botId, memory, now) {
   };
 }
 
-// [THINK LIKE A PLAYER] Work the evidence out in code, so the model can't
-// miss it: who this bot saw where a body turned up, and who the humans have
-// been accusing across this match's meetings.
-const ACCUSE_WORDS = /\b(sus|saw|dekha|bhaga|kill|killed|maara|mara|pakka|vote|lying|jhooth|body ke paas|near the body)\b/i;
+// [THINK LIKE A PLAYER] Facts worked out in code from this bot's own memory
+// and public game events - the model reasons over them like a detective.
+// Claims in chat are NOT facts; they get checked against these.
+const ACCUSE_WORDS = /\b(sus|saw|seen|dekha|dekhi|bhaga|bhagte|bhaag|nikla|nikal|niklte|ran|running|came out|vent|kill|killed|maara|mara|maarte|pakka|vote|lying|jhooth|body ke paas|near the body)\b/i;
+const DETAIL_RX = /\b(body|laash|lash|maara|maarte|mara|kill|killed|vent|bhaga|bhagte|nikla|ran|came out)\b/i;
+const nameRx = (n) => new RegExp(`\\b${String(n).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i");
 function evidenceLines(room, botId, memory, now) {
   const out = [];
-  const alive = Object.entries(room.players).filter(([id, p]) => p.alive !== false && id !== botId);
-  // 1) I saw someone in the room where a body was found, shortly before it was found
-  for (const b of memory.filter((m) => m.kind === "body")) {
-    const near = memory.filter((m) => m.kind === "saw" && m.where === b.where && m.t <= b.t && b.t - m.t < 60000 && alive.some(([, p]) => p.name === m.name));
-    for (const n of near.slice(-2)) out.push(`YOU saw ${n.name} in ${b.where} shortly before ${b.name}'s body was found there. That makes ${n.name} suspicious - it SUPPORTS anyone accusing ${n.name}. It is NOT an alibi.`);
+  const me = room.players[botId];
+  const meeting = room.meeting || {};
+  const rel = (t) => (now - t < 15000 ? "just before the meeting" : now - t < 60000 ? "a little before" : "earlier");
+  // 1) Kill window for each body: from the last time I saw the victim alive to when the body was found.
+  const bodies = [];
+  for (const b of memory.filter((m) => m.kind === "body")) bodies.push({ victim: b.name, where: b.where, foundAt: b.t });
+  const rep = meeting.reportedBodyId && room.players[meeting.reportedBodyId];
+  if (rep && !bodies.some((b) => b.victim === rep.name)) bodies.push({ victim: rep.name, where: typeof rep.bodyX === "number" ? B.roomNameAt(rep.bodyX, rep.bodyY) : null, foundAt: meeting.startedAt || now });
+  for (const b of bodies.slice(-2)) {
+    const lastAlive = [...memory].reverse().find((m) => m.kind === "saw" && m.name === b.victim && m.t <= b.foundAt);
+    const from = lastAlive ? lastAlive.t : b.foundAt - 90000;
+    const seen = memory.filter((m) => m.kind === "saw" && m.t >= from && m.t <= b.foundAt && m.name !== b.victim);
+    const byName = {};
+    for (const m of seen) (byName[m.name] = byName[m.name] || []).push(m);
+    const parts = Object.entries(byName).map(([n, list]) => {
+      const atBody = b.where && list.some((m) => m.where === b.where);
+      const last = list[list.length - 1];
+      return `${n} in ${last.where}${atBody ? ` (THE BODY'S ROOM)` : ""}${last.with && last.with.length ? ` with ${last.with.join(", ")}` : ""}`;
+    });
+    out.push(`${b.victim} died${b.where ? ` in ${b.where}` : ""}${lastAlive ? ` some time after you last saw them alive in ${lastAlive.where} (${rel(lastAlive.t)})` : ""}. While that could have happened you saw: ${parts.length ? parts.join("; ") : "nobody (you can't confirm or rule out anyone)"}.`);
   }
-  for (const k of memory.filter((m) => m.kind === "kill")) out.push(`YOU SAW ${k.name} kill ${k.victim}. Say it and vote ${k.name}.`);
-  // 2) who the humans accused this match (all meetings), and how often
+  for (const k of memory.filter((m) => m.kind === "kill")) out.push(`YOU SAW ${k.name} kill ${k.victim}${k.via === "camera" ? " on the cameras" : ""}. That is certain.`);
+  // 2) Track record: earlier accusations vs what the vote-outs revealed (public).
+  for (const e of room.ejections || []) {
+    const accusers = new Set();
+    for (const m of (room.matchChat || []).filter((x) => x.kind === "msg" && x.text && ACCUSE_WORDS.test(x.text))) {
+      const sp = room.players[m.senderId];
+      if (sp && sp.name !== e.name && nameRx(e.name).test(m.text)) accusers.add(sp.name + (sp.isBot ? " (bot)" : ""));
+    }
+    out.push(`${e.name} was voted out in meeting ${e.meetingNo} and was ${e.role === "saboteur" ? "a SABOTEUR" : "CREW (innocent)"}.${accusers.size ? ` Pushed by: ${[...accusers].join(", ")} - ${e.role === "saboteur" ? "they were right, more trustworthy" : "they were wrong; a saboteur could have been framing"}.` : ""}`);
+  }
+  // 3) Who keeps accusing whom this match.
   const counts = {};
-  for (const e of [...(room.matchChat || []).filter((x) => x.kind === "msg"), ...((room.meeting && room.meeting.messages) || [])]) {
+  for (const e of [...(room.matchChat || []).filter((x) => x.kind === "msg"), ...(meeting.messages || [])]) {
     const sender = room.players[e.senderId];
-    if (!sender || sender.isBot || !e.text || !ACCUSE_WORDS.test(e.text)) continue;
-    for (const [, p] of alive) if (p !== sender && new RegExp(`\\b${p.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(e.text)) { const k = `${sender.name}->${p.name}`; counts[k] = (counts[k] || 0) + 1; }
+    if (!sender || sender === me || !e.text || !ACCUSE_WORDS.test(e.text)) continue;
+    for (const [, p] of Object.entries(room.players)) if (p !== sender && p.alive !== false && nameRx(p.name).test(e.text)) { const k = `${sender.name}->${p.name}`; counts[k] = (counts[k] || 0) + 1; }
   }
-  for (const [k, n] of Object.entries(counts)) { const [a, t] = k.split("->"); out.push(`${a} has accused ${t}${n > 1 ? ` ${n} times this match` : ""}${n > 1 ? " - repeated, consistent accusations are worth taking seriously" : ""}.`); }
-  return out.slice(0, 6);
+  for (const [k, n] of Object.entries(counts)) { const [a, t] = k.split("->"); out.push(`${a} has accused ${t}${n > 1 ? ` ${n} times this match` : " once"} (a claim - check it against the facts above).`); }
+
+  // 4) Detective notebook: score each living suspect from the facts + claims.
+  const roomNames = Object.values(B.ROOM_NAME || {});
+  const score = {}, why = {}, liars = [];
+  const add = (n, v, r) => { score[n] = (score[n] || 0) + v; (why[n] = why[n] || []).push(r); };
+  const latest = bodies[bodies.length - 1];
+  if (latest) {
+    const lastAlive = [...memory].reverse().find((m) => m.kind === "saw" && m.name === latest.victim && m.t <= latest.foundAt);
+    const from = lastAlive ? lastAlive.t : latest.foundAt - 90000;
+    const inWindow = memory.filter((m) => m.kind === "saw" && m.t >= from && m.t <= latest.foundAt);
+    for (const m of inWindow) if (latest.where && m.where === latest.where && m.name !== latest.victim) add(m.name, 2, `you saw them in the body's room (${latest.where})`);
+    // claims about the latest death
+    const ejectRole = {}; for (const e of room.ejections || []) ejectRole[e.name] = e.role;
+    for (const e of meeting.messages || []) {
+      const sp = room.players[e.senderId];
+      if (!sp || sp === me || !e.text || !ACCUSE_WORDS.test(e.text)) continue;
+      for (const [, p] of Object.entries(room.players)) {
+        if (p === sp || p.alive === false || !nameRx(p.name).test(e.text)) continue;
+        const specific = DETAIL_RX.test(e.text) || roomNames.some((r) => e.text.toLowerCase().includes(r.toLowerCase()));
+        // does my own memory put the accused somewhere else during the window?
+        const elsewhere = inWindow.filter((m) => m.name === p.name && latest.where && m.where !== latest.where);
+        if (elsewhere.length && !inWindow.some((m) => m.name === p.name && m.where === latest.where)) {
+          add(p.name, -3, `you saw them in ${elsewhere[elsewhere.length - 1].where}, not the body's room`);
+          add(sp.name, 2, `their claim about ${p.name} contradicts what you saw`);
+          liars.push(`${sp.name}'s claim about ${p.name} CONTRADICTS what you saw (${p.name} was in ${elsewhere[elsewhere.length - 1].where}).`);
+          continue;
+        }
+        add(p.name, specific ? 1 : 0.5, `${sp.name} ${specific ? "gave a specific claim" : "made a vague claim"}`);
+        const record = Object.entries(ejectRole).find(([n]) => (room.matchChat || []).some((x) => x.kind === "msg" && x.senderId === e.senderId && nameRx(n).test(x.text || "")));
+        if (record) add(p.name, record[1] === "saboteur" ? 1 : -1, `${sp.name}'s last accusation was ${record[1] === "saboteur" ? "right" : "wrong"}`);
+      }
+    }
+  }
+  for (const l of liars) out.push(l);
+  const ranked = Object.entries(score).filter(([n]) => n !== me.name && Object.values(room.players).some((p) => p.name === n && p.alive !== false)).sort((a, b) => b[1] - a[1]);
+  const top = ranked[0];
+  if (top && top[1] >= 3) out.push(`YOUR READ: ${top[0]} is very likely a saboteur (${why[top[0]].join("; ")}). Say why and vote ${top[0]}.`);
+  else if (top && top[1] > 0) out.push(`YOUR READ: leaning ${top[0]} (${why[top[0]].join("; ")}) but not enough yet - ask ${top[0]} or the accuser ONE specific question; vote skip unless more comes out.`);
+  else out.push("YOUR READ: nothing points to anyone yet - ask a specific question or share what you saw; vote skip.");
+  evidenceLines.last = { voteFor: top && top[1] >= 3 ? top[0] : null, liars: liars.length ? Object.keys(score).filter((n) => score[n] >= 2 && why[n].some((r) => r.includes("contradicts"))) : [] };
+  return out.slice(-10);
 }
 
 const PERSONAS = [
@@ -251,9 +318,12 @@ function systemPrompt(ctx) {
     ? `You are secretly the SABOTEUR${ctx.teammates.length ? ` (your fellow saboteur: ${ctx.teammates.join(", ")})` : ""}. Never admit it. Stay calm, give a believable alibi from what you "did", and if useful cast doubt on someone else - but don't overdo it, and never contradict facts everyone saw. Don't vote for your teammate.`
     : [
       "You are CREW. Tell the truth about what you remember. You may be unsure - say so. If you saw a kill, say it clearly.",
-      "THINK LIKE A REAL PLAYER: a player saying they SAW someone kill, or run from / stand over a body, IS evidence - in this game eyewitness testimony is the only proof anyone ever has. Don't keep demanding \"proof\". Check it against your own memory: if nothing you remember contradicts it, say you believe them and vote that person. If your memory DOES contradict it (you saw the accused somewhere else at that moment), say so plainly.",
-      "Weigh who is consistent: someone who accused the same person in an earlier meeting and now there's another body is MORE believable; someone who only deflects (\"prove it\", \"you're sus for reporting\") without giving their own alibi is LESS believable.",
-      "Change your mind when someone gives new information. Don't call someone sus just for reporting a body.",
+      "THINK LIKE A REAL DETECTIVE. Things players say are CLAIMS, not proof - saboteurs lie, report their own kills, and frame innocent people. Treat a claim as a lead and test it:",
+      "1) Check it against the FACTS (who you saw where while the victim could have died). If the facts contradict a claim, say so plainly - and become suspicious of whoever made the false claim.",
+      "2) If a claim is vague (\"pakka X hai\", \"trust me\"), ask that person ONE specific question: which room, when, what were they doing there. Real witnesses give details and stay consistent; liars stay vague or change their story.",
+      "3) Use the track record: people whose earlier accusation turned out right are more believable; people who pushed out an innocent are less.",
+      "4) Vote someone out only if you saw it yourself, or at least two separate things point to them (e.g. a specific claim no fact contradicts + they were in the body's room / have no alibi / only deflect instead of giving their own whereabouts). Otherwise say who you lean towards and why, and vote skip.",
+      "Never treat reporting a body, or demanding proof, as evidence by itself. Change your mind when new facts come in.",
     ].join(" ");
   return [
     `You are "${ctx.me.name}", a player in NEAR Saboteur, a social deduction game: crew do missions on a space station, one or two hidden saboteurs kill people. Everyone is now in a meeting to discuss and vote someone out.`,
@@ -290,7 +360,7 @@ function userPrompt(ctx, alreadySaid, trigger, othersSaid) {
     ctx.earlier && ctx.earlier.length ? "Earlier meetings in THIS match (what people said):" : "",
     ...(ctx.earlier && ctx.earlier.length ? ctx.earlier : []),
     ctx.earlier && ctx.earlier.length ? "" : "",
-    ctx.evidence && ctx.evidence.length ? "EVIDENCE CHECK (worked out for you - trust this over your own guess):" : "",
+    ctx.evidence && ctx.evidence.length ? "FACTS (from your own eyes and public game events - reliable; chat messages are only claims):" : "",
     ...(ctx.evidence && ctx.evidence.length ? ctx.evidence.map((l) => `- ${l}`) : []),
     ctx.evidence && ctx.evidence.length ? "" : "",
     "What you remember (only you know this):",
@@ -430,6 +500,15 @@ async function think(room, roomCode, botId, memory, bs, now, st, purpose) {
   if (typeof out.vote === "string" && out.vote.toLowerCase() !== "skip") {
     const hit = Object.entries(room.players).find(([id, p]) => p.alive !== false && id !== botId && p.name.toLowerCase() === out.vote.trim().toLowerCase());
     if (hit && !(ctx.isSab && hit[1].role === "saboteur")) vote = hit[0];
+  }
+  // [DETECTIVE] the code's read wins on the vote: strong case -> vote it; never vote out someone the facts clear
+  if (ctx.read && !ctx.isSab) {
+    const idOf = (n) => { const h = Object.entries(room.players).find(([id, p]) => p.alive !== false && id !== botId && p.name === n); return h ? h[0] : null; };
+    if (ctx.read.voteFor && vote === "skip") vote = idOf(ctx.read.voteFor) || vote;
+    if (vote !== "skip" && room.players[vote] && !ctx.read.voteFor && !(ctx.read.liars || []).includes(room.players[vote].name)) {
+      const kill = memory.some((m) => m.kind === "kill" && m.name === room.players[vote].name);
+      if (!kill) vote = "skip"; // not enough evidence yet
+    }
   }
   if (ctx.noDeaths) vote = "skip"; // nobody died: nothing to vote anyone out for
   return { say, vote, source };
@@ -633,7 +712,7 @@ async function learnFromMatch(room) {
       }
     }
     const lost = room.winner === "saboteur" ? "crew" : "saboteur";
-    const user = `TRUTH: the saboteur${sabs.length > 1 ? "s were" : " was"} ${sabs.join(", ")}. ${room.winner === "saboteur" ? "SABOTEURS WON - the crew lost." : "CREW WON - the saboteurs lost."}\n${verdicts.length ? `Accusations and whether they were right:\n${verdicts.join("\n")}\n` : ""}\nMeeting chat:\n${transcript}\n\nUsing the truth above (not how convincing people sounded): what mistakes did the ${lost} side's AI bots make, and what did the winners do well? Write lessons that would make the AI crew catch saboteurs more often and the AI saboteurs blend in better. If a correct accusation was ignored, the crew lesson must be about trusting that kind of testimony - never the opposite.`;
+    const user = `TRUTH: the saboteur${sabs.length > 1 ? "s were" : " was"} ${sabs.join(", ")}. ${room.winner === "saboteur" ? "SABOTEURS WON - the crew lost." : "CREW WON - the saboteurs lost."}\n${verdicts.length ? `Accusations and whether they were right:\n${verdicts.join("\n")}\n` : ""}\nMeeting chat:\n${transcript}\n\nUsing the truth above (not how convincing people sounded): what mistakes did the ${lost} side's AI bots make, and what did the winners do well? Write lessons that would make the AI crew catch saboteurs more often and the AI saboteurs blend in better. Judge testimony by the truth: if a correct, specific accusation was ignored, the lesson is how to recognise believable testimony; if a false accusation was followed, the lesson is how to spot a liar. Never conclude that testimony should simply be ignored or simply be trusted.`;
     const out = await callNearAI(system, user);
     const banned = [...Object.values(room.players).map((p) => p.name), ...Object.values(B.ROOM_NAME || {}), "near", "ironclaw", "legion"];
     const a = await LESSONS.save("crew", Array.isArray(out.crew) ? out.crew : [], banned);

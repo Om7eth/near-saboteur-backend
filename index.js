@@ -8393,6 +8393,9 @@ function finalizeVoting(roomCode) {
     eliminatedId = topChoices[0];
     if (room.players[eliminatedId]) {
       room.players[eliminatedId].alive = false;
+      room.players[eliminatedId].ejected = true;
+      // [AI BOTS] public record of who was voted out and what they really were (everyone sees the reveal)
+      (room.ejections = room.ejections || []).push({ name: room.players[eliminatedId].name, role: room.players[eliminatedId].role, meetingNo: room.meetingNo || 0 });
       // Voted-out players don't have a "killer" cutscene, but they do
       // still leave a body for the corpse-cleanup logic to track and
       // later clear (see CLEAR_BODY below).
@@ -11098,7 +11101,7 @@ io.on("connection", (socket) => {
     delete room.activeSabotageType;
     delete room.departedCrewmateMissions;
     delete room.ghostChat; // [BUG FIX] Clear ghost chat between games
-    delete room.matchChat; delete room.meetingNo; delete room.backVotes; // [CHAT REDESIGN] new match, fresh meeting chat (+ backed votes)
+    delete room.matchChat; delete room.ejections; delete room.meetingNo; delete room.backVotes; // [CHAT REDESIGN] new match, fresh meeting chat (+ backed votes)
 
     // [BUG FIX] A player who disconnected mid-game (see the disconnect
     // handler's grace period) but hadn't yet had their grace period
@@ -11229,7 +11232,7 @@ io.on("connection", (socket) => {
     delete room.activeSabotageType;
     delete room.departedCrewmateMissions;
     delete room.ghostChat; // [BUG FIX] Clear ghost chat between games
-    delete room.matchChat; delete room.meetingNo; delete room.backVotes; // [CHAT REDESIGN] new match, fresh meeting chat (+ backed votes)
+    delete room.matchChat; delete room.ejections; delete room.meetingNo; delete room.backVotes; // [CHAT REDESIGN] new match, fresh meeting chat (+ backed votes)
 
     // [NEW FEATURE] Public room is joinable again - reuses the same
     // Telegram message (no spam). Fire-and-forget.
@@ -11491,7 +11494,7 @@ io.on("connection", (socket) => {
     // disconnect-grace flag) even if some reset path didn't run first.
     delete room.meeting;
     delete room.ghostChat;
-    delete room.matchChat; delete room.meetingNo; delete room.backVotes; // [CHAT REDESIGN]
+    delete room.matchChat; delete room.ejections; delete room.meetingNo; delete room.backVotes; // [CHAT REDESIGN]
     delete room.activeGateLock;
     delete room.activeSabotageType;
     delete room.departedCrewmateMissions;
@@ -11587,7 +11590,7 @@ io.on("connection", (socket) => {
     playerIds.forEach((id, spawnIndex) => {
       const role = saboteurIds.has(id) ? "saboteur" : "crewmate";
       room.players[id].role = role;
-      room.players[id].alive = true;
+      room.players[id].alive = true; delete room.players[id].ejected;
       // [NEW FEATURE] Task-reminder tracking - crewmates only (a
       // Saboteur has no missions to be reminded about). Reset fresh
       // every game. See the inactivity-check interval near the bottom
