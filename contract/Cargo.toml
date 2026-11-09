@@ -1,0 +1,43 @@
+[package]
+name = "near_saboteur_pool"
+version = "0.2.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Pinned to an EXACT, current (as of July 2026) near-sdk version so
+# every build is byte-for-byte reproducible - no semver-caret drift to
+# some unverified future patch version. near-sdk 5.26.1's own minimum
+# supported Rust version is 1.86 - see the toolchain pin in
+# deploy-contract.yml.
+near-sdk = { version = "=5.26.1", features = ["legacy"] }
+borsh = "1.5"
+
+[profile.release]
+# [BUG FIX - EMPTY WASM OUTPUT] The aggressive size-optimization combo
+# below (codegen-units=1 + opt-level="z" + lto=true + strip=true) was
+# producing a genuinely EMPTY 86-byte WASM file with near-sdk 5.5.0's
+# newer sibling 5.26.1 + a newer Rust toolchain - the linker was
+# apparently treating the entire contract as dead code and stripping
+# ALL of it away, even though the exact same settings worked fine with
+# the older near-sdk/toolchain pairing many builds ago. Correctness
+# first: dropped down to a plain, unoptimized-for-size release build so
+# the actual contract code definitely survives. Binary will be larger
+# (costs a bit more in deploy/storage gas) - can revisit re-adding
+# targeted size optimization later, one flag at a time, once this is
+# confirmed working end-to-end.
+overflow-checks = true
+# [v4] size optimisation re-enabled one flag at a time and checked: the
+# build still exports every contract method (see the export check in the
+# audit notes) and runs on testnet.
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+debug = false
+strip = true
+
+[dev-dependencies]
+near-sdk = { version = "=5.26.1", features = ["legacy", "unit-testing"] }

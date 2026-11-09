@@ -96,21 +96,70 @@ async function ensureWallet(id) {
 }
 
 // payouts: [{ wallet, amount }] (whole tokens). One transaction from the
-// rewards wallet with one ft_transfer per receiver. Resolves { ok, txHash, error }.
-function payMatch(payouts, memo) {
+// rewards wallet with one ft_transfer per receiver (all-or-nothing: if one
+// transfer fails, none happen). Resolves { ok, txHash, error }.
+//
+// [NO DOUBLE PAY] A timeout does NOT mean the transaction failed - it may
+// still land. So the transaction is signed first and handed to onSigned()
+// to be saved, then sent. On a retry (opts.prior) we first ask the chain
+// what happened to that exact transaction:
+//   succeeded        -> done, never send again
+//   failed on-chain  -> nothing moved (atomic) -> safe to build a new one
+//   not found        -> re-send the SAME signed bytes (same nonce, so it can
+//                       land at most once); only if it can no longer land
+//                       (expired / nonce already used by something else)
+//                       is a new transaction built.
+async function txOutcome(txHash) {
+  const { provider } = await chain();
+  try {
+    const r = await provider.viewTransactionStatus({ txHash, accountId: REWARDS, waitUntil: "EXECUTED_OPTIMISTIC" });
+    if (r && r.status && r.status.Failure) return "failed";
+    if (r && r.status && ("SuccessValue" in r.status || "SuccessReceiptId" in r.status)) return "success";
+    return "unknown";
+  } catch (e) {
+    return "unknown";
+  }
+}
+function failureText(f) {
+  try { return JSON.stringify(f).slice(0, 300); } catch { return "transaction failed"; }
+}
+function payMatch(payouts, memo, opts = {}) {
   const list = (payouts || []).filter((p) => p.wallet && Number(p.amount) > 0);
   if (!configured() || !list.length) return Promise.resolve({ ok: false, error: configured() ? "nothing to pay" : "not configured" });
   return enqueue(async () => {
+    const { near, rewards, provider } = await chain();
     try {
-      const { near, rewards } = await chain();
+      const prior = opts.prior;
+      if (prior && prior.txHash) {
+        const st = await txOutcome(prior.txHash);
+        if (st === "success") return { ok: true, txHash: prior.txHash };
+        if (st === "unknown" && prior.signedTx) {
+          try {
+            const signed = near.SignedTransaction.decode(Buffer.from(prior.signedTx, "base64"));
+            const res = await provider.sendTransactionUntil(signed, "EXECUTED_OPTIMISTIC");
+            if (res && res.status && res.status.Failure) return { ok: false, error: failureText(res.status.Failure) };
+            return { ok: true, txHash: prior.txHash };
+          } catch (e) {
+            const msg = String(e.message || e);
+            if (!/expired|nonce/i.test(msg)) return { ok: false, error: msg.slice(0, 300) }; // still might land - keep waiting
+            // can it have landed after all? (nonce used by this very tx)
+            if ((await txOutcome(prior.txHash)) === "success") return { ok: true, txHash: prior.txHash };
+            // expired or nonce taken by another tx -> this one can never land: build a new one below
+          }
+        }
+        // "failed" -> nothing moved; build a new one below
+      }
       for (const p of list) await ensureWallet(p.wallet);
-      const res = await rewards.signAndSendTransaction({
-        receiverId: TOKEN,
-        actions: list.map((p) => near.actions.functionCall(
-          "ft_transfer", { receiver_id: p.wallet, amount: toUnits(p.amount), memo: memo || null }, near.teraToGas("12"), 1n,
-        )),
-      });
-      const txHash = res?.transaction?.hash || res?.transaction_outcome?.id || null;
+      const actions = list.map((p) => near.actions.functionCall(
+        "ft_transfer", { receiver_id: p.wallet, amount: toUnits(p.amount), memo: memo || null }, near.teraToGas("12"), 1n,
+      ));
+      const publicKey = await rewards.signer.getPublicKey();
+      const tx = await rewards.createTransaction({ receiverId: TOKEN, actions, publicKey });
+      const { txHash: hashBytes, signedTransaction } = await rewards.signer.signTransaction(tx);
+      const txHash = near.baseEncode(hashBytes);
+      if (opts.onSigned) await opts.onSigned(txHash, Buffer.from(signedTransaction.encode()).toString("base64"));
+      const res = await provider.sendTransactionUntil(signedTransaction, "EXECUTED_OPTIMISTIC");
+      if (res && res.status && res.status.Failure) return { ok: false, error: failureText(res.status.Failure) };
       return { ok: true, txHash };
     } catch (e) {
       console.warn("[SABOTEUR] payout failed:", e.message);

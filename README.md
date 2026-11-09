@@ -20,8 +20,23 @@ When creating a pool, the host picks:
 
 | Mode | Money | How winners get paid |
 |---|---|---|
-| **Testnet · auto payout** | Test NEAR held by the pool contract | The contract pays the top 3 automatically (50 / 30 / 20 after the 5% fee). |
-| **Real NEAR · host pays** | Real NEAR, never held by the game | Players give a mainnet `.near` address when they join. After the last match the game ranks everyone and works out each prize from the host's own split. The host sends the NEAR from their own wallet and marks each winner as paid. Each winner gets an Inbox message. |
+| **Testnet · auto payout** | Test NEAR held by the pool contract | The contract pays the top 3 automatically (50 / 30 / 20 after the 5% fee). Tied players share their places. |
+| **Real NEAR · host pays** | Real NEAR on **mainnet**, never held by the game | Players give a mainnet address (`name.near`, `name.tg`, …) when they join. After the last match the game ranks everyone and works out each prize from the host's own split. The host pays everyone from their own wallet: in **one click** or manually, as described below. Each winner gets an Inbox message. |
+
+### Real NEAR payouts: one click or manual
+
+This is a real mainnet money flow inside the game today. When the host opens **Pool Games → History → Pay winners**, they can pay in either of two ways:
+
+1. **One click: "Pay all winners".** The host connects their mainnet wallet (HOT, Meteor or Intear) and approves **once**.
+   - The wallet sends one transfer per winner, straight to the address each winner gave when joining.
+   - The server then reads every transaction on NEAR mainnet. It checks that the transaction succeeded, that the receiver is that winner's address, and that the amount is at least the prize.
+   - Only then is the prize marked **✓ VERIFIED**, and the winner is told it was verified on-chain.
+   - If the tab closes after the wallet approval but before every payment is checked, the check runs again the next time the page opens.
+2. **Manual.** The host sends each amount themselves, from any wallet, and presses **Mark as paid**.
+   - If they add the transaction hash, it is verified the same way.
+   - Without a hash, the winner is told the host *marked* it as sent, not that it was verified.
+
+Either way, one transaction can only prove one prize. The game never holds, touches or signs for this money.
 
 > **Real NEAR mode is temporary.** It exists because the game runs on NEAR testnet today. When NEAR Saboteur moves to mainnet, the manual "host pays" flow will be removed. Prizes will then be held and paid out by the in-game contract, the same way the testnet mode works now.
 
@@ -43,7 +58,8 @@ Prizes go out automatically 15 seconds after the last match. Nobody has to confi
 | Some matches finished (for example 1 or 2 of 3): the room is empty for 3 minutes, the host closes it, or the lobby sits idle | **Settled on the matches played.** The standings after those matches count, and the result is marked "ended early". |
 | The lobby sits idle between matches | The next match must start within **10 minutes**. The lobby shows a countdown. After that, the pool settles on the matches played so far. |
 | The server restarts in the middle of a Real NEAR pool | Standings are saved after every match. Once no server has touched the pool for 15 minutes, it is settled from those saved standings, or cancelled if no match had finished. |
-| Players tie (Real NEAR) | The tied players share the places they cover equally. For example, two players tied for #1 on a 50/30/20 split each get 40%. The testnet contract always pays 50/30/20 by position. |
+| Players tie | The tied players share the places they cover equally. For example, two players tied for #1 on a 50/30/20 split each get 40%. This applies to Real NEAR pools and, with pool contract v4, to testnet pools too. |
+| Nobody who paid scored a point (testnet) | Everyone is refunded. A payout to zero winners is impossible: contract v4 rejects it. |
 | Fewer players scored than there are paid places | The prize for the empty places stays with the host. Only players with more than 0 points can win. |
 | A Real NEAR host leaves before the first match | The pool stays open, and any player can run the lobby. A testnet pool host leaving before the start still cancels and refunds the pool. |
 
@@ -57,3 +73,34 @@ These rules apply on **testnet only** (`NEAR_NETWORK=testnet`). None of them run
 - **Funder reserve:** the gift is only sent if the funder still has **5 NEAR** left after sending it. Below that, wallets are still created, just without the gift.
 - **Older wallets:** a wallet that was made before this and has less than 0.5 test NEAR gets the same 1 NEAR, **once**, via `POST /wallet/testnet-topup`.
 - **Settings:** override the amounts with `TESTNET_WALLET_GIFT_NEAR` (default 1) and `TESTNET_FUNDER_RESERVE_NEAR` (default 5).
+
+## Pool contract (testnet)
+
+The Rust contract is in [`contract/`](contract/). The tables below list what a v4 build protects against.
+
+- **Deploy:** GitHub → Actions → *Build and Deploy Pool Contract*.
+  - Pick the branch with the contract (`dev`) and set `run_init = false` when upgrading the live contract.
+  - The workflow runs `cargo test` first and refuses to deploy if any test fails.
+- **Upgrade:** v4 keeps the exact v3 storage layout, so existing pools keep working. No migration is needed.
+- **Testing:** the upgrade was tested on testnet by deploying v3, creating pools, deploying v4 over it and finishing those pools.
+- **Backend detection:** the backend calls `get_version` to see whether the contract is v4. It uses tie-aware `distribute_shares` with v4 and `distribute_prizes` with v3, so nothing has to be switched on by hand.
+
+| Rule | Why |
+|---|---|
+| A payout needs at least 1 winner, with no duplicates, all of them real participants, and shares that add up to exactly 100%. | v3 could mark a pool paid while sending nothing, which trapped the money. |
+| Every transfer has a result callback. A failed one, for example to an account that doesn't exist, is kept for that account to claim with `claim_unclaimed`. | The money never silently stays in the contract, and nobody else can redirect it. |
+| Fee and rounding dust go to the platform balance. | Every yoctoNEAR is accounted for. |
+| `admin_refund_pool` on an entry-fee pool refunds each player their own fee. | v3 sent the whole pot to the host. |
+| Pool names are at most 64 bytes, with at most 50 participants per pool. | Stops storage spam. |
+| Only the backend (oracle) can pay out or cancel a started pool. Only the owner can use the 24-hour fallback. | Unchanged from v3. |
+
+### Backend money rules
+
+- **Who gets paid:** before paying, the server reads the pool from the chain.
+  - It only pays a pool that is Locked there, and never pays one twice.
+  - Each winner is paid to the wallet that actually joined on-chain, so a later wallet change can't break the payout.
+  - If nobody eligible scored, everyone is refunded.
+- **Pre-lock check:** just before the host locks the pool, anyone who paid the entry fee but isn't in the room is either linked to their player or refunded.
+- **$SABOTEUR rewards:** the payout transaction is signed and saved before it is sent. A retry re-sends that same transaction, so a timeout can never pay twice.
+- **In-game wallets:** each player can create at most 2 in-game wallets, and the testnet gift is sent once per player. This stops anyone from draining the funder account that also pays pool gas.
+- **Admin → Pools → On-chain check:** lists every pool still holding money in the contract with no live room behind it, including very old untracked ones, and resolves it with one click.

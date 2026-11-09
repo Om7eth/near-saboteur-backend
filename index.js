@@ -204,6 +204,8 @@ const playerSchema = new mongoose.Schema({
   payoutWallet: { type: String, default: null },
   // [TESTNET GIFT] when an older, empty in-game wallet got its one-time 1 test NEAR
   testnetTopupAt: { type: Date, default: null },
+  // [FUNDS SAFETY] how many in-game wallets the server has paid to create for this player (max 2)
+  ingameWalletsCreated: { type: Number, default: 0 },
   walletResetApproved: { type: Boolean, default: false },
   // [NEW FEATURE - WALLET-BASED IDENTITY] A NEAR wallet the player has
   // cryptographically proven ownership of via a signed message (NEP-413,
@@ -495,6 +497,9 @@ const poolRecordSchema = new mongoose.Schema({
   state: { type: String, enum: ["Open", "Locked", "Distributed", "Refunded"], default: "Open", index: true },
   participantAccountIds: { type: [String], default: [] },
   onChainParticipantAccountIds: { type: [String], default: [] },
+  // [FUNDS SAFETY v4] accountId -> the exact wallet that paid/joined on-chain,
+  // so a later wallet change can never make a payout fail.
+  onChainWalletByAccountId: { type: mongoose.Schema.Types.Mixed, default: {} },
   matchesPlayed: { type: Number, default: 0 },
   // accountId -> points, last-known snapshot - kept updated every time
   // room.pool.leaderboard changes (see stagePendingPointsForRoom), so
@@ -942,6 +947,98 @@ async function distributePrizesOnChain(poolId, rankedWinnerAccountIds) {
   }
 }
 
+// ============================================================
+// [FUNDS SAFETY v4] One place that decides WHO gets paid and HOW MUCH for an
+// on-chain pool, used by both the live-room path and the restart-recovery
+// path. Rules:
+//  - reads the pool from the CHAIN first: already settled -> nothing to do;
+//    not Locked -> never call distribute (it would fail).
+//  - a winner must be a real on-chain participant, paid to the exact wallet
+//    that joined (a later wallet change can't break the payout).
+//  - nobody eligible scored -> the caller refunds everyone instead (a payout
+//    to zero winners would leave the money stuck in the contract forever).
+//  - shares: 50/30/20 of 95%. With the v4 contract (POOL_CONTRACT_V4=1) ties
+//    split their places evenly, same as the standings screen shows.
+// ============================================================
+// Detected from the contract itself (get_version exists from v4 on), so
+// nothing needs to be switched on by hand after the upgrade is deployed.
+let poolContractV4 = { value: false, checkedAt: 0 };
+async function isPoolContractV4() {
+  if (Date.now() - poolContractV4.checkedAt < 10 * 60 * 1000) return poolContractV4.value;
+  const v = await viewContract("get_version", {});
+  poolContractV4 = { value: typeof v === "string" && Number(v.split(".")[0]) >= 4, checkedAt: Date.now() };
+  return poolContractV4.value;
+}
+const POOL_SPLIT_BPS = [5000, 3000, 2000];
+const POOL_MAX_PAYOUTS = 10;
+async function planOnChainPayout(pool, leaderboard) {
+  const chainPool = await viewContract("get_pool", { pool_id: Number(pool.onChainPoolId) });
+  if (!chainPool) return { error: "Couldn't read this pool on-chain right now - will retry." };
+  if (chainPool.state === "Distributed" || chainPool.state === "Refunded") return { chainPool, settled: chainPool.state };
+  if (chainPool.state !== "Locked") return { chainPool, error: `Pool is "${chainPool.state}" on-chain, not Locked - can't pay out.` };
+  const onChain = new Set(chainPool.participants || []);
+  const eligible = new Set(pool.onChainParticipantAccountIds || []);
+  const ranked = Object.entries(leaderboard || {})
+    .filter(([id, pts]) => Number(pts) > 0 && eligible.has(id))
+    .sort((a, b) => Number(b[1]) - Number(a[1]));
+  const saved = pool.onChainWalletByAccountId || {};
+  const docs = ranked.length ? await Player.find({ _id: { $in: ranked.map((r) => r[0]) } }, "walletAddress").lean() : [];
+  const current = new Map(docs.map((d) => [String(d._id), d.walletAddress]));
+  const people = [];
+  const used = new Set();
+  for (const [accountId, points] of ranked) {
+    const wallet = [saved[accountId], current.get(accountId)].filter(Boolean).find((w) => onChain.has(w) && !used.has(w));
+    if (!wallet) continue; // never joined on-chain with any wallet we know - can't be paid
+    used.add(wallet);
+    people.push({ accountId, wallet, points: Number(points) });
+  }
+  let pairs = [];
+  const v4 = await isPoolContractV4();
+  if (v4) {
+    let place = 0;
+    for (let i = 0; i < people.length && place < POOL_SPLIT_BPS.length; ) {
+      let j = i;
+      while (j < people.length && people[j].points === people[i].points) j++;
+      const n = j - i;
+      const groupBps = POOL_SPLIT_BPS.slice(place, place + n).reduce((a, b) => a + b, 0);
+      for (let k = i; k < j; k++) pairs.push({ ...people[k], rank: place + 1, rawBps: groupBps / n, tied: n > 1 });
+      place += n; i = j;
+    }
+    if (pairs.length > POOL_MAX_PAYOUTS) pairs = pairs.slice(0, POOL_MAX_PAYOUTS); // only with a 10+-way tie
+  } else {
+    pairs = people.slice(0, 3).map((p, i) => ({ ...p, rank: i + 1, rawBps: POOL_SPLIT_BPS[i], tied: false }));
+  }
+  // Normalise to 10,000 basis points exactly like the contract does when
+  // fewer than 3 places are filled, so the numbers we show = what is paid.
+  const sum = pairs.reduce((a, p) => a + p.rawBps, 0);
+  let given = 0;
+  for (const p of pairs) { p.bps = Math.floor((p.rawBps * 10000) / sum); given += p.bps; }
+  if (pairs.length) pairs[0].bps += 10000 - given;
+  const totalFundNear = Number(BigInt(chainPool.total_fund || "0") / 10n ** 18n) / 1e6; // 6-decimal precision is plenty for display
+  const payoutPoolNear = totalFundNear * 0.95;
+  for (const p of pairs) p.amountNear = Math.floor(payoutPoolNear * p.bps / 10000 * 1e5) / 1e5;
+  return { chainPool, pairs, totalFundNear, payoutPoolNear, v4 };
+}
+async function executeOnChainPayout(poolId, plan) {
+  if (!plan.v4) return distributePrizesOnChain(poolId, plan.pairs.map((p) => p.wallet));
+  if (!POOL_CONTRACT_ACCOUNT_ID) return { success: false, error: "Contract not configured" };
+  const account = await getOracleAccount();
+  if (!account) return { success: false, error: "Oracle account not configured" };
+  try {
+    const nearAPI = await loadNearAPI();
+    const result = await account.callFunction({
+      contractId: POOL_CONTRACT_ACCOUNT_ID,
+      methodName: "distribute_shares",
+      args: { pool_id: Number(poolId), payouts: plan.pairs.map((p) => ({ account_id: p.wallet, bps: p.bps })) },
+      gas: nearAPI.teraToGas("200"),
+    });
+    return { success: true, result };
+  } catch (e) {
+    console.error(`[POOL CONTRACT] distribute_shares(pool ${poolId}) failed:`, e.message);
+    return { success: false, error: e.message };
+  }
+}
+
 // [BUG FIX - REFUND NEVER ACTUALLY WORKED] This used to call
 // admin_refund_pool, which is owner-only AND only works on a pool
 // that's already Locked and past its 24h hold (see lib.rs) - but every
@@ -983,45 +1080,35 @@ async function distributePoolPrizesOnce(room, roomCode) {
   // create_pool itself), so they can never be a real payout winner no
   // matter how well they scored - see onChainParticipantAccountIds'
   // own comment on why this list exists at all.
-  const rankedAccountIds = Object.entries(room.pool.leaderboard)
-    .filter(([accountId, points]) => points > 0 && (room.pool.onChainParticipantAccountIds || []).includes(accountId))
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 3)
-    .map(([accountId]) => accountId);
-
-  // [BUG FIX - WRONG ACCOUNT SENT ON-CHAIN] Root cause of a real,
-  // confirmed bug: room.pool.leaderboard (like every other pool-
-  // tracking field) is keyed by this app's own internal accountId
-  // (the Player document's MongoDB _id - see resolveAccountFromToken)
-  // - that's the right identity for everything ELSE pool-related
-  // (who's allowed to Enter, who still needs to confirm, and so on),
-  // but distribute_prizes needs each winner's REAL NEAR wallet
-  // address, not this app's internal id for them. Sending the Mongo
-  // id straight through made every payout fail on-chain with "X never
-  // participated in this pool" - true, since no NEAR account named
-  // after a Mongo id ever could have. This looks each ranked winner's
-  // actual walletAddress up before calling the contract at all.
-  const winnerPlayers = await Player.find({ _id: { $in: rankedAccountIds } }, "walletAddress");
-  const walletByAccountId = new Map(winnerPlayers.map((p) => [p._id.toString(), p.walletAddress]));
-  // [BUG FIX - WINNERS SHOWED AS "Player"/"0 pts"] Pair each accountId
-  // with its wallet address explicitly (rather than two separate
-  // parallel arrays) - keeps them correctly aligned even in the edge
-  // case where a winner somehow has no wallet on file and gets skipped,
-  // which would otherwise have silently shifted a plain wallet-only
-  // array out of sync with the accountId order.
-  const rankedWinnerPairs = rankedAccountIds
-    .map((accountId) => ({ accountId, walletAddress: walletByAccountId.get(accountId) || null }))
-    .filter((w) => w.walletAddress); // skip anyone who somehow has no wallet on file - shouldn't happen, but never send a blank/undefined account to the contract
-  const rankedWinners = rankedWinnerPairs.map((w) => w.walletAddress);
-  const rankedWinnerAccountIds = rankedWinnerPairs.map((w) => w.accountId);
-  // [BUG FIX - WALLET HISTORY SHOWED "You lost" FOR A REAL PRIZE PAYOUT]
-  // 1-indexed rank per accountId, used below when committing each
-  // participant's MatchRecord, so /wallet/history can say "2nd place"
-  // instead of relying on the match's own won/lost flag.
-  const poolRankByAccountId = new Map(rankedWinnerAccountIds.map((accountId, i) => [accountId, i + 1]));
+  // [FUNDS SAFETY v4] see planOnChainPayout
+  const plan = await planOnChainPayout(room.pool, room.pool.leaderboard);
+  if (plan.settled) {
+    room.pool.state = plan.settled;
+    savePoolRecord({ onChainPoolId: room.pool.onChainPoolId }, { state: plan.settled, settledAt: new Date(), lastSettlementError: null });
+    io.to(roomCode).emit("poolUpdated", { pool: room.pool });
+    return { success: true, already: true };
+  }
+  if (plan.error) {
+    savePoolRecord({ onChainPoolId: room.pool.onChainPoolId }, { lastSettlementError: plan.error, lastSettlementAttemptAt: new Date() });
+    PoolRecord.updateOne({ onChainPoolId: room.pool.onChainPoolId }, { $inc: { settlementAttempts: 1 } }).catch(() => {});
+    io.to(roomCode).emit("poolDistributed", { success: false, error: plan.error, rankedWinners: [], rankedWinnerAccountIds: [], winners: [], payoutTxHash: null, entryFeeNear: room.pool.entryFeeNear, potNear: 0 });
+    return { success: false, error: plan.error };
+  }
+  if (plan.pairs.length === 0) {
+    // Nobody who really joined on-chain scored a point - refund everyone
+    // rather than "paying" zero winners (that would trap the money).
+    const refund = await cancelPoolOnChain(room.pool.onChainPoolId);
+    if (refund.success) room.pool.state = "Refunded";
+    io.to(roomCode).emit("poolDistributed", { success: refund.success, refunded: true, error: refund.error || null, rankedWinners: [], rankedWinnerAccountIds: [], winners: [], payoutTxHash: null, entryFeeNear: room.pool.entryFeeNear, potNear: 0 });
+    io.to(roomCode).emit("poolUpdated", { pool: room.pool });
+    return refund;
+  }
+  const rankedWinners = plan.pairs.map((p) => p.wallet);
+  const rankedWinnerAccountIds = plan.pairs.map((p) => p.accountId);
+  const poolRankByAccountId = new Map(plan.pairs.map((p) => [p.accountId, p.rank]));
 
   io.to(roomCode).emit("poolDistributing", {});
-  const outcome = await distributePrizesOnChain(room.pool.onChainPoolId, rankedWinners);
+  const outcome = await executeOnChainPayout(room.pool.onChainPoolId, plan);
   const payoutTxHash = outcome.success ? (outcome.result?.transaction?.hash || outcome.result?.transaction_outcome?.id || null) : null;
   if (outcome.success) {
     room.pool.state = "Distributed";
@@ -1047,30 +1134,17 @@ async function distributePoolPrizesOnce(room, roomCode) {
   // when the on-chain payout genuinely succeeded - if it failed, no
   // NEAR actually moved, so recording a "won X NEAR" figure here would
   // be recording something that didn't really happen yet.
-  const onChainParticipantCount = (room.pool.onChainParticipantAccountIds || []).length;
+  // [FUNDS SAFETY v4] amounts come from the on-chain pot and the exact
+  // shares sent to the contract - what we show is what was paid.
   const entryFeeNear = Number(room.pool.entryFeeNear || 0);
-  const totalFundNear = room.pool.hostFunded ? entryFeeNear : entryFeeNear * onChainParticipantCount;
-  const payoutPoolNear = totalFundNear - (totalFundNear * 0.05);
-  const splitPctAll = [50, 30, 20];
-  const splitTotal = splitPctAll.slice(0, rankedWinnerAccountIds.length).reduce((a, b) => a + b, 0) || 1;
+  const payoutPoolNear = plan.payoutPoolNear;
   const nearWonByAccountId = new Map();
   if (outcome.success) {
-    rankedWinnerAccountIds.forEach((accountId, i) => {
-      nearWonByAccountId.set(accountId, payoutPoolNear * (splitPctAll[i] || 0) / splitTotal);
-    });
-    // [NEW FEATURE - TRANSACTIONS LEDGER] One entry per real prize
-    // payout, plus one for the platform's own cut - the txHash for
-    // these (a single distribute_prizes call fans out to N transfers on
-    // the contract's side) isn't captured here, same documented
-    // limitation as every other oracle-signed action - still fully
-    // listed by type/amount/accountId.
-    rankedWinnerAccountIds.forEach((accountId, i) => {
-      const amountNear = payoutPoolNear * (splitPctAll[i] || 0) / splitTotal;
-      if (amountNear > 0) {
-        pushTxnLog(room.pool.onChainPoolId, { type: "distribute_prizes", accountId, amountNear, note: `Rank ${i + 1} of ${rankedWinnerAccountIds.length}` });
-      }
-    });
-    const platformFeeNear = totalFundNear * 0.05;
+    for (const p of plan.pairs) {
+      nearWonByAccountId.set(p.accountId, p.amountNear);
+      if (p.amountNear > 0) pushTxnLog(room.pool.onChainPoolId, { type: "distribute_prizes", accountId: p.accountId, amountNear: p.amountNear, note: `Rank ${p.rank}${p.tied ? " (tied)" : ""} of ${plan.pairs.length}` });
+    }
+    const platformFeeNear = plan.totalFundNear * 0.05;
     if (platformFeeNear > 0) {
       pushTxnLog(room.pool.onChainPoolId, { type: "platform_fee", amountNear: platformFeeNear, note: "5% platform fee" });
     }
@@ -1086,7 +1160,7 @@ async function distributePoolPrizesOnce(room, roomCode) {
   const lbById = new Map(lbList.map((e) => [e.accountId, e]));
   const winnersOut = rankedWinnerAccountIds.map((accountId, i) => {
     const e = lbById.get(accountId) || {};
-    return { rank: i + 1, accountId, name: e.name || e.username || "Player", avatarId: e.avatarId || null, points: e.totalPoints || 0, amountNear: Math.round((nearWonByAccountId.get(accountId) || 0) * 1000) / 1000 };
+    return { rank: poolRankByAccountId.get(accountId) || i + 1, accountId, name: e.name || e.username || "Player", avatarId: e.avatarId || null, points: e.totalPoints || 0, amountNear: Math.round((nearWonByAccountId.get(accountId) || 0) * 1000) / 1000 };
   });
   const standings = lbList.filter((e) => (room.pool.onChainParticipantAccountIds || []).includes(e.accountId))
     .map((e) => ({ accountId: e.accountId, name: e.name || e.username || "Player", avatarId: e.avatarId || null, matches: (e.matches || []).map((m) => m.points), total: e.totalPoints || 0 }));
@@ -1197,32 +1271,22 @@ async function distributePoolPrizesOnce(room, roomCode) {
 // which is the one thing that's still fully recoverable from the
 // snapshot alone).
 async function settlePoolFromRecord(record) {
-  const rankedAccountIds = Object.entries(record.leaderboardSnapshot || {})
-    .filter(([accountId, points]) => points > 0 && (record.onChainParticipantAccountIds || []).includes(accountId))
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 3)
-    .map(([accountId]) => accountId);
-
-  if (rankedAccountIds.length === 0) {
-    // No real winner in the snapshot at all (every real participant
-    // scored 0, or somehow none were on-chain participants) - there's
-    // nothing fair to pay out via distribute_prizes (it requires at
-    // least a real participant to send money to), so treat this the
-    // same as "nothing happened" and refund everyone instead, exactly
-    // like a normal Open-pool cancellation would.
+  // [FUNDS SAFETY v4] same winner rules as the live path (planOnChainPayout)
+  const plan = await planOnChainPayout(record, record.leaderboardSnapshot || {});
+  if (plan.settled) {
+    savePoolRecord({ onChainPoolId: record.onChainPoolId }, { state: plan.settled, settledAt: new Date(), lastSettlementError: null });
+    return { success: true, already: true };
+  }
+  if (plan.error) {
+    savePoolRecord({ onChainPoolId: record.onChainPoolId }, { lastSettlementError: plan.error, lastSettlementAttemptAt: new Date() });
+    return { success: false, error: plan.error };
+  }
+  if (plan.pairs.length === 0) {
+    // No real winner in the snapshot - refund everyone (paying zero
+    // winners would trap the money in the contract).
     return cancelPoolOnChain(record.onChainPoolId);
   }
-
-  const winnerPlayers = await Player.find({ _id: { $in: rankedAccountIds } }, "walletAddress");
-  const walletByAccountId = new Map(winnerPlayers.map((p) => [p._id.toString(), p.walletAddress]));
-  const rankedWinners = rankedAccountIds.map((id) => walletByAccountId.get(id)).filter(Boolean);
-
-  if (rankedWinners.length === 0) {
-    savePoolRecord({ onChainPoolId: record.onChainPoolId }, { lastSettlementError: "No ranked winner had a wallet on file", lastSettlementAttemptAt: new Date() });
-    return { success: false, error: "No ranked winner had a wallet on file" };
-  }
-
-  const outcome = await distributePrizesOnChain(record.onChainPoolId, rankedWinners);
+  const outcome = await executeOnChainPayout(record.onChainPoolId, plan);
   if (outcome.success) {
     savePoolRecord({ onChainPoolId: record.onChainPoolId }, { state: "Distributed", settledAt: new Date(), lastSettlementError: null });
   } else {
@@ -1738,7 +1802,7 @@ const manualPoolSchema = new mongoose.Schema({
   isPublic: Boolean,
   state: { type: String, default: "Open" }, // Open | Live | Finished | Cancelled
   players: [{ accountId: String, name: String, username: String, wallet: String, _id: false }],
-  winners: [{ rank: Number, accountId: String, name: String, username: String, wallet: String, points: Number, amountNear: Number, tied: Boolean, paidAt: Date, _id: false }],
+  winners: [{ rank: Number, accountId: String, name: String, username: String, wallet: String, points: Number, amountNear: Number, tied: Boolean, paidAt: Date, verifiedAt: Date, txHash: String, _id: false }],
   finishedAt: Date,
   leaderboard: { type: mongoose.Schema.Types.Mixed, default: {} }, // accountId -> points, saved after every match
   endedEarly: { type: Boolean, default: false },  // settled before all planned matches were played
@@ -2833,8 +2897,30 @@ app.post("/wallet/create-named-account", async (req, res) => {
     const oracleAccount = await getOracleAccount();
     if (!oracleAccount) return res.status(503).json({ message: "Wallet creation service is temporarily unavailable." });
 
+    // [FUNDS SAFETY] Every new wallet is paid for by the oracle account (the
+    // same account that pays gas for pool payouts). Without a limit, one
+    // logged-in player could create wallets in a loop and drain it, which
+    // would also stop pool prizes from being paid. Max 2 per player (the
+    // second one covers a wallet reset), claimed atomically.
+    const MAX_INGAME_WALLETS = 2;
+    const claimed = await Player.updateOne(
+      { _id: player._id, $or: [{ ingameWalletsCreated: { $lt: MAX_INGAME_WALLETS } }, { ingameWalletsCreated: { $exists: false } }] },
+      { $inc: { ingameWalletsCreated: 1 } },
+    );
+    if (!claimed.modifiedCount) {
+      return res.status(429).json({ message: "You've already created the maximum number of in-game wallets. Contact support if you need help." });
+    }
+    const releaseClaim = () => Player.updateOne({ _id: player._id, ingameWalletsCreated: { $gt: 0 } }, { $inc: { ingameWalletsCreated: -1 } }).catch(() => {});
+
     try {
       const nearAPI = await loadNearAPI();
+      // keep the oracle's gas reserve: never create a wallet that would dip under it
+      const funderBalance = BigInt(await oracleAccount.getBalance());
+      if (NEAR_NETWORK === "testnet" && funderBalance < BigInt(nearAPI.nearToYocto(String(TESTNET_FUNDER_RESERVE_NEAR)))) {
+        await releaseClaim();
+        console.warn(`[WALLET] oracle balance under the ${TESTNET_FUNDER_RESERVE_NEAR} NEAR reserve - not creating ${newAccountId}`);
+        return res.status(503).json({ message: "Wallet creation is paused for a moment. Try again later." });
+      }
       // [NEW FEATURE - TESTNET ONLY] Every new wallet gets funded with a
       // real, spendable 0.05 NEAR right away - but ONLY on testnet,
       // where it's worthless play-money the oracle account can hand out
@@ -2857,6 +2943,7 @@ app.post("/wallet/create-named-account", async (req, res) => {
         amount: nearAPI.nearToYocto(fundingAmount),
       });
     } catch (createErr) {
+      await releaseClaim(); // nothing was created - doesn't count
       // [BUG FIX] This used to silently treat "already exists" as
       // success and hand back the existing account id anyway - see the
       // big comment above for why that's actually broken (the freshly
@@ -2869,7 +2956,14 @@ app.post("/wallet/create-named-account", async (req, res) => {
       }
       throw createErr;
     }
-    const gift = await giftTestnetNear(newAccountId); // [TESTNET GIFT] 1 test NEAR on top, if the funder can spare it
+    // [TESTNET GIFT] 1 test NEAR on top - once per player (shares the claim
+    // with /wallet/testnet-topup), if the funder can spare it
+    let gift = { sent: false };
+    const giftClaim = await Player.updateOne({ _id: player._id, testnetTopupAt: null }, { $set: { testnetTopupAt: new Date() } });
+    if (giftClaim.modifiedCount) {
+      gift = await giftTestnetNear(newAccountId);
+      if (!gift.sent) await Player.updateOne({ _id: player._id }, { $set: { testnetTopupAt: null } });
+    }
     res.json({ accountId: newAccountId, giftedNear: gift.sent ? gift.amountNear : 0 });
   } catch (err) {
     console.error("[WALLET] /wallet/create-named-account error:", err.message);
@@ -3924,17 +4018,43 @@ app.post("/pools/manual/:poolId/paid", async (req, res) => {
     const w = (m.winners || []).find((x) => x.rank === rank);
     if (!w) return res.status(400).json({ message: "No winner at that rank." });
     const txNote = String(req.body.txHash || "").trim().slice(0, 120);
-    if (!w.paidAt) {
-      w.paidAt = new Date();
+    // [FUNDS SAFETY] If the host gives a transaction hash, check it on
+    // mainnet: it must have succeeded, sent NEAR to this winner's wallet,
+    // and be at least the prize. Unverified marks are labelled as such -
+    // we never tell a winner "verified" on the host's word alone.
+    let verified = false;
+    // one transaction can only ever prove one prize
+    const reused = txNote ? await ManualPool.findOne({ winners: { $elemMatch: { txHash: txNote } } }, "poolId").lean() : null;
+    if (reused && !(reused.poolId === m.poolId && w.txHash === txNote)) {
+      return res.status(409).json({ message: "That transaction was already used for another prize." });
+    }
+    if (txNote && /^[1-9A-HJ-NP-Za-km-z]{43,44}$/.test(txNote) && w.wallet) {
+      const host = await Player.findById(account.accountId, "payoutWallet playPassPayerWallet walletAddress").lean();
+      const senders = [...new Set([req.body.fromWallet, host && host.payoutWallet, host && host.playPassPayerWallet, host && host.walletAddress]
+        .filter(Boolean).map((x) => String(x).trim().toLowerCase()))];
+      const nearAPI = await loadNearAPI();
+      for (const from of senders) {
+        const tx = await readMainnetTransfer(txNote, from);
+        if (!tx.ok) continue;
+        const minYocto = BigInt(nearAPI.nearToYocto(String(w.amountNear))) * 999n / 1000n;
+        verified = tx.succeeded && tx.receiver === w.wallet && tx.yocto >= minYocto;
+        break;
+      }
+    }
+    if (!w.paidAt || (verified && !w.verifiedAt)) {
+      if (!w.paidAt) w.paidAt = new Date();
+      if (verified) { w.verifiedAt = new Date(); w.txHash = txNote; }
       m.markModified("winners");
       await m.save();
       sendInboxMessage(w.accountId, {
         title: `Your prize was sent · ${m.poolName || "Pool game"}`,
-        body: `The host marked your #${w.rank} prize of ${w.amountNear} NEAR as sent to ${w.wallet || "your wallet"}.${txNote ? ` Transaction: ${txNote}` : ""}`,
+        body: verified
+          ? `Your #${w.rank} prize of ${w.amountNear} NEAR was sent to ${w.wallet} - verified on the NEAR blockchain. Transaction: ${txNote}`
+          : `The host marked your #${w.rank} prize of ${w.amountNear} NEAR as sent to ${w.wallet || "your wallet"}. We couldn't verify it on-chain yet - check your wallet, and report it from Inbox if nothing arrived.${txNote ? ` Transaction given: ${txNote}` : ""}`,
         nameTag: "Pool Games",
       }).catch(() => {});
     }
-    res.json({ ok: true, winners: m.winners });
+    res.json({ ok: true, verified, winners: m.winners });
   } catch (e) {
     res.status(500).json({ message: "Couldn't update that winner." });
   }
@@ -4365,8 +4485,8 @@ async function readMainnetTransfer(txHash, payerAccountId) {
       const st = res?.status || {};
       const succeeded = Object.prototype.hasOwnProperty.call(st, "SuccessValue") || Object.prototype.hasOwnProperty.call(st, "SuccessReceiptId");
       const tx = res?.transaction || {};
-      const transfer = (tx.actions || []).find((a) => a && a.Transfer);
-      const yocto = transfer ? BigInt(transfer.Transfer.deposit || "0") : 0n;
+      // every Transfer action counts (a wallet may split one payment); nothing else does
+      const yocto = (tx.actions || []).filter((a) => a && a.Transfer).reduce((sum, a) => sum + BigInt(a.Transfer.deposit || "0"), 0n);
       return { ok: true, succeeded, signer: tx.signer_id, receiver: tx.receiver_id, yocto };
     } catch (e) { lastErr = e.message; }
   }
@@ -6385,6 +6505,49 @@ app.get("/admin/funds", requireAdmin, async (req, res) => {
 // logic (reconcileOnePool) - never a separate, less-trusted code path
 // for something that moves real money. Refuses to run on anything
 // already resolved (Distributed/Refunded) - nothing to do there.
+// [FUNDS SAFETY] Reads EVERY pool straight from the contract and lists the
+// ones still holding money (Open/Locked) with no live room behind them -
+// including very old pools from before PoolRecord tracking existed, which
+// the automatic reconcile loop never sees. Read-only.
+async function scanChainOrphans() {
+  const out = [];
+  let misses = 0;
+  const records = new Map((await PoolRecord.find({}, "onChainPoolId matchesPlayed state createdAt roomCode poolName").lean()).map((r) => [String(r.onChainPoolId), r]));
+  for (let id = 1; misses < 5 && id < 5000; id += 5) {
+    const batch = await Promise.all([0, 1, 2, 3, 4].map((k) => viewContract("get_pool", { pool_id: id + k })));
+    for (const p of batch) {
+      if (!p) { misses++; continue; }
+      misses = 0;
+      if (p.state !== "Open" && p.state !== "Locked") continue;
+      const key = String(p.id);
+      const live = Object.values(rooms).some((r) => r.pool && String(r.pool.onChainPoolId) === key);
+      if (live) continue;
+      const rec = records.get(key) || null;
+      out.push({
+        onChainPoolId: key, name: p.name, state: p.state, hostFunded: p.host_funded, hostId: p.host_id,
+        participants: p.participants, totalNear: Number(BigInt(p.total_fund) / 10n ** 18n) / 1e6,
+        tracked: !!rec, matchesPlayed: rec ? rec.matchesPlayed || 0 : null, roomCode: rec ? rec.roomCode : null,
+        action: rec && p.state === "Locked" && (rec.matchesPlayed || 0) > 0 ? "pay out from the last saved standings" : "refund everyone (no finished match on record)",
+      });
+    }
+  }
+  return out;
+}
+app.get("/admin/pools/chain-orphans", requireAdmin, async (req, res) => {
+  try { res.json({ success: true, pools: await scanChainOrphans() }); }
+  catch (e) { res.status(500).json({ message: "Couldn't scan the contract: " + e.message }); }
+});
+app.post("/admin/pools/chain-orphans/:onChainPoolId/resolve", requireAdmin, requireFullAdmin, async (req, res) => {
+  try {
+    const key = String(req.params.onChainPoolId);
+    if (Object.values(rooms).some((r) => r.pool && String(r.pool.onChainPoolId) === key)) return res.status(409).json({ message: "A live room is still using this pool." });
+    const rec = await PoolRecord.findOne({ onChainPoolId: key });
+    const result = rec ? await reconcileOnePool(rec, { force: true }) : { action: "refund", outcome: await cancelPoolOnChain(key) };
+    logAdminAction("pool-orphan-resolved", { onChainPoolId: key, action: result.action || null, ok: !!(result.outcome && result.outcome.success) });
+    res.json({ success: true, result });
+  } catch (e) { res.status(500).json({ message: "Couldn't resolve that pool: " + e.message }); }
+});
+
 app.post("/admin/funds/:onChainPoolId/retry", requireAdmin, requireFullAdmin, async (req, res) => {
   try {
     const record = await PoolRecord.findOne({ onChainPoolId: req.params.onChainPoolId });
@@ -9389,6 +9552,7 @@ io.on("connection", (socket) => {
         // matching list confirmFinalResult must filter the leaderboard
         // against before ranking anyone for a real payout.
         onChainParticipantAccountIds: hostFunded ? [account.accountId] : [],
+        onChainWalletByAccountId: hostFunded ? { [account.accountId]: hostPlayer.walletAddress } : {}, // [FUNDS SAFETY v4]
         // Off-chain running total per participant across every match
         // played in this pool - the definitive source for computing the
         // final ranked winners once every match is done (there's no
@@ -9559,6 +9723,7 @@ io.on("connection", (socket) => {
         state: "Open",
         participantAccountIds: poolSetup.participantAccountIds,
         onChainParticipantAccountIds: poolSetup.onChainParticipantAccountIds,
+        onChainWalletByAccountId: poolSetup.onChainWalletByAccountId || {},
         matchesPlayed: 0,
         leaderboardSnapshot: {},
         poolName: poolSetup.poolName || null,
@@ -9740,9 +9905,12 @@ io.on("connection", (socket) => {
     if (isFirstTimeRegistration) {
       room.pool.onChainParticipantAccountIds.push(account.accountId);
     }
+    // [FUNDS SAFETY v4] remember the exact wallet that joined on-chain
+    room.pool.onChainWalletByAccountId = { ...(room.pool.onChainWalletByAccountId || {}), [account.accountId]: wallet };
     savePoolRecord({ onChainPoolId: room.pool.onChainPoolId }, {
       participantAccountIds: room.pool.participantAccountIds,
       onChainParticipantAccountIds: room.pool.onChainParticipantAccountIds,
+      onChainWalletByAccountId: room.pool.onChainWalletByAccountId,
     });
     if (isFirstTimeRegistration) {
       pushTxnLog(room.pool.onChainPoolId, {
@@ -11293,6 +11461,60 @@ io.on("connection", (socket) => {
   // contract call succeeds (fired the moment they press Start on a pool
   // room). See startGame's own gate above for why this exists - the
   // actual match doesn't begin until this has landed.
+  // [FUNDS SAFETY] Called by the host right BEFORE lock_participation.
+  // Anyone who paid the entry fee on-chain but never got registered in the
+  // room (closed tab, failed confirm) would otherwise have their fee go to
+  // the winners while they can't play. While the pool is still Open we
+  // either attach them to their player in this room, or refund them.
+  socket.on("preparePoolLock", async (_d, callback) => {
+    const respond = typeof callback === "function" ? callback : () => {};
+    try {
+      const room = rooms[socket.data.roomCode];
+      if (!room || !room.pool || !room.pool.onChainPoolId) return respond({ ok: true });
+      const me = room.players[socket.id];
+      if (!me || !me.isHost) return respond({ ok: false, message: "Only the host can start the pool." });
+      const chainPool = await viewContract("get_pool", { pool_id: Number(room.pool.onChainPoolId) });
+      if (!chainPool) return respond({ ok: false, message: "Couldn't reach the NEAR network - try again in a moment." });
+      if (chainPool.state !== "Open") return respond({ ok: true });
+      if (chainPool.host_funded) return respond({ ok: true }); // free joiners paid nothing; non-registered ones can never win
+      const pool = room.pool;
+      const known = new Set(Object.values(pool.onChainWalletByAccountId || {}));
+      const strays = (chainPool.participants || []).filter((w) => !known.has(w));
+      const refunded = [];
+      for (const wallet of strays) {
+        // a player in this room with that wallet? register them (their confirm was lost)
+        const owner = await Player.findOne({ walletAddress: wallet }, "_id").lean();
+        const inRoom = owner && Object.values(room.players).some((p) => p.accountId === String(owner._id));
+        if (inRoom) {
+          const id = String(owner._id);
+          if (!pool.participantAccountIds.includes(id)) pool.participantAccountIds.push(id);
+          if (!pool.onChainParticipantAccountIds.includes(id)) pool.onChainParticipantAccountIds.push(id);
+          pool.onChainWalletByAccountId = { ...(pool.onChainWalletByAccountId || {}), [id]: wallet };
+          pushTxnLog(pool.onChainPoolId, { type: "participate", accountId: id, amountNear: pool.entryFeeNear || 0, note: "Paid entry fee (registered at start)" });
+          continue;
+        }
+        const r = await refundParticipantOnChain(pool.onChainPoolId, wallet);
+        if (r.success) {
+          refunded.push(wallet);
+          pushTxnLog(pool.onChainPoolId, { type: "refund_participant", accountId: owner ? String(owner._id) : null, amountNear: pool.entryFeeNear || 0, note: `Paid but wasn't in the room at start - refunded to ${wallet}` });
+          if (owner) sendInboxMessage(owner._id, { title: "Entry fee refunded", body: `You paid ${pool.entryFeeNear} NEAR to join "${pool.poolName || "a paid game"}" but weren't in the room when it started, so it was sent back to ${wallet}.`, nameTag: "Paid Games" }).catch(() => {});
+        } else {
+          return respond({ ok: false, message: `A player paid but isn't in the room, and their refund failed (${r.error}). Try again in a moment.` });
+        }
+      }
+      savePoolRecord({ onChainPoolId: pool.onChainPoolId }, {
+        participantAccountIds: pool.participantAccountIds,
+        onChainParticipantAccountIds: pool.onChainParticipantAccountIds,
+        onChainWalletByAccountId: pool.onChainWalletByAccountId,
+      });
+      io.to(room.code).emit("poolUpdated", { pool });
+      respond({ ok: true, refunded: refunded.length });
+    } catch (e) {
+      console.error("[POOL] preparePoolLock failed:", e.message);
+      respond({ ok: false, message: "Couldn't check the pool before starting - try again." });
+    }
+  });
+
   socket.on("confirmPoolLocked", async () => {
     const roomCode = socket.data.roomCode;
     const room = rooms[roomCode];

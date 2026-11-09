@@ -537,13 +537,20 @@ ACT.ppGiftFind = async () => {
 let poQ = { tab: 'pools', filter: '', page: 1, tpage: 1, ttype: '', tsearch: '', legacy: 1 };
 R.pools = async (el, first) => {
   await refreshCounts();
-  const tabs = `<div class="chips">${[['pools', 'Pools'], ['tx', 'Transactions'], ['legacy', 'Older pools']].map(([k, t]) => `<button class="chip ${poQ.tab === k ? 'on' : ''}" data-act="poT" data-k="${k}">${t}</button>`).join('')}</div>`;
+  const tabs = `<div class="chips">${[['pools', 'Pools'], ['tx', 'Transactions'], ['legacy', 'Older pools'], ['chain', 'On-chain check']].map(([k, t]) => `<button class="chip ${poQ.tab === k ? 'on' : ''}" data-act="poT" data-k="${k}">${t}</button>`).join('')}</div>`;
   if (poQ.tab === 'tx') {
     const types = [['', 'All'], ['participate', 'Entries'], ['distribute_prizes', 'Prizes'], ['platform_fee', 'Fees'], ['refund_participant', 'Refunds'], ['cancel_pool', 'Cancelled'], ['create_pool', 'Created'], ['lock_participation', 'Started']];
     const d = await api(`/admin/transactions?page=${poQ.tpage}&type=${poQ.ttype}&search=${encodeURIComponent(poQ.tsearch)}`);
     const rows = d.rows.length ? `<div class="card" style="padding:8px 10px"><div class="tbl"><table><tr><th>WHEN</th><th>WHAT</th><th>WHO</th><th>NEAR</th><th>POOL</th><th></th></tr>${d.rows.map((r) => `<tr><td class="mono">${when(r.createdAt)}</td><td>${esc((r.type || '').replace(/_/g, ' '))}${r.stuck ? ' <span class="tag red">STUCK</span>' : ''}${r.outcome ? ` <span class="tag dim">${esc(r.outcome)}</span>` : ''}</td><td>${esc(r.playerName || r.accountId || '—')}</td><td>${r.amountNear ? near(r.amountNear) : '—'}</td><td class="mono">#${esc(r.onChainPoolId)} · ${esc(r.roomCode || '')}</td><td style="text-align:right">${r.txHash ? `<a class="mono" href="${explorer(r.txHash)}" target="_blank" rel="noreferrer">tx ↗</a>` : ''}</td></tr>`).join('')}</table></div>${pager(d.page, d.pages, (n) => { poQ.tpage = n; load(false); })}</div>` : '<div class="empty">No transactions match.</div>';
     if (first || !$('#txS')) { el.innerHTML = `${tabs}<div class="row"><input class="in" id="txS" placeholder="Search player or room…" value="${esc(poQ.tsearch)}" style="max-width:300px"><div class="chips">${types.map(([k, t]) => `<button class="chip ${poQ.ttype === k ? 'on' : ''}" data-act="txT" data-k="${k}">${t}</button>`).join('')}</div></div><div id="txL">${rows}</div>`; let t; $('#txS').oninput = (e) => { clearTimeout(t); t = setTimeout(() => { poQ.tsearch = e.target.value.trim(); poQ.tpage = 1; load(false); }, 300); }; }
     else $('#txL').innerHTML = rows;
+    return;
+  }
+  if (poQ.tab === 'chain') {
+    el.innerHTML = `${tabs}<p class="muted" style="margin:0 0 10px">Reads every pool straight from the contract and lists the ones still holding test NEAR with no live room — including old pools from before tracking existed. Takes a few seconds.</p><div id="chL" class="empty">Scanning the contract…</div>`;
+    const d = await api('/admin/pools/chain-orphans');
+    const total = d.pools.reduce((a, p) => a + p.totalNear, 0);
+    $('#chL').outerHTML = d.pools.length ? `<div class="card" style="padding:8px 10px"><div style="margin-bottom:8px"><b style="color:var(--g)">${d.pools.length} pool${d.pools.length === 1 ? '' : 's'} · ${Math.round(total * 1000) / 1000} tNEAR</b> <small class="muted">still held in the contract</small></div><div class="tbl"><table><tr><th>POOL</th><th>STATE</th><th>TYPE</th><th>NEAR</th><th>PLAYERS</th><th>WHAT RESOLVE DOES</th><th></th></tr>${d.pools.map((p) => `<tr><td class="mono">#${esc(p.onChainPoolId)} ${esc(p.name || '')}</td><td>${esc(p.state)}${p.tracked ? '' : ' <span class="tag dim">untracked</span>'}</td><td>${p.hostFunded ? 'Pool' : 'Paid'}</td><td>${near(p.totalNear)}</td><td>${p.participants.length}</td><td class="muted" style="font-size:12px">${esc(p.action)}</td><td style="text-align:right">${guard(`<button class="btn red" data-act="chRes" data-p="${esc(p.onChainPoolId)}" data-w="${esc(p.action)}">Resolve</button>`)}</td></tr>`).join('')}</table></div></div>` : '<div class="empty">Nothing stuck in the contract. 🎉</div>';
     return;
   }
   if (poQ.tab === 'legacy') {
@@ -563,6 +570,12 @@ R.pools = async (el, first) => {
     </div>`).join('') + pager(d.page, d.pages, (n) => { poQ.page = n; load(false); }) : `<div class="empty">${poQ.filter ? 'Nothing needs attention. 🎉' : 'No pools yet.'}</div>`}`;
 };
 ACT.poT = (b) => { poQ.tab = b.dataset.k; load(true); };
+ACT.chRes = async (b) => {
+  if (!await ask({ title: `Resolve pool #${b.dataset.p}?`, body: `This will <b>${esc(b.dataset.w)}</b>. Money only ever goes back to the people who paid it in, or to that pool's winners.`, ok: 'Resolve', danger: true })) return;
+  const r = await act(b, () => api(`/admin/pools/chain-orphans/${b.dataset.p}/resolve`, { method: 'POST' }));
+  if (r && r.result) toast(r.result.skipped ? `Not resolved: ${r.result.reason}` : `Done: ${r.result.action}${r.result.outcome && r.result.outcome.success ? ' ✓' : ' — failed: ' + ((r.result.outcome && r.result.outcome.error) || '')}`, !(r.result.outcome && r.result.outcome.success));
+  load(false);
+};
 ACT.poF = (b) => { poQ.filter = b.dataset.k; poQ.page = 1; load(true); };
 ACT.txT = (b) => { poQ.ttype = b.dataset.k; poQ.tpage = 1; load(true); };
 ACT.poRetry = async (b) => {

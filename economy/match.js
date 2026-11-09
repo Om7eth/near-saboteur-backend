@@ -26,6 +26,9 @@ const ledgerSchema = new mongoose.Schema({
   amount: Number,                            // whole $SABOTEUR
   status: { type: String, enum: ["pending", "sent", "failed", "skipped"], default: "pending", index: true },
   txHash: String,
+  // [NO DOUBLE PAY] the batch's transaction is signed and saved BEFORE it is
+  // sent; a retry re-sends this exact transaction (same nonce) instead of a new one
+  signedTx: String,
   error: String,
   createdAt: { type: Date, default: Date.now, index: true },
 });
@@ -148,10 +151,14 @@ async function settleMatch({ io, roomCode, room, computePoints, hasDb }) {
 
 async function payPending(docs, matchId) {
   if (!docs.length) return;
-  const res = await T.payMatch(docs.map((d) => ({ wallet: d.wallet, amount: d.amount })), `match ${matchId}`);
   const ids = docs.map((d) => d._id);
+  const prior = docs.find((d) => d.signedTx && d.txHash);
+  const res = await T.payMatch(docs.map((d) => ({ wallet: d.wallet, amount: d.amount })), `match ${matchId}`, {
+    prior: prior ? { txHash: prior.txHash, signedTx: prior.signedTx } : null,
+    onSigned: (txHash, signedTx) => TokenLedger.updateMany({ _id: { $in: ids } }, { $set: { txHash, signedTx } }),
+  });
   await TokenLedger.updateMany({ _id: { $in: ids } },
-    res.ok ? { $set: { status: "sent", txHash: res.txHash, error: null } } : { $set: { status: "failed", error: res.error } },
+    res.ok ? { $set: { status: "sent", txHash: res.txHash, error: null }, $unset: { signedTx: 1 } } : { $set: { status: "failed", error: res.error } },
   ).catch(() => {});
   if (res.ok) console.log(`[SABOTEUR] paid ${docs.length} wallets for ${matchId} (tx ${res.txHash})`);
 }
