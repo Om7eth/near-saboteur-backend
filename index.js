@@ -4120,7 +4120,7 @@ app.get("/rooms/live", (req, res) => {
       const host = Object.values(r.players).find((p) => p.isHost);
       const base = {
         code: r.code,
-        playerCount: Object.keys(r.players).length,
+        playerCount: Object.values(r.players).filter((rp) => !rp.spectator).length, // [WATCH MODE] a watching host is not a player
         hostUsername: host?.accountUsername || null,
         hostName: host?.name || "Host",
         hostHasLegionBadge: !!host?.hasLegionBadge,
@@ -4257,7 +4257,7 @@ app.get("/pools/live", async (req, res) => {
       entryFeeNear: r.pool.entryFeeNear,
       hostFunded: r.pool.hostFunded,
       state: r.pool.state,
-      playerCount: Object.keys(r.players).length,
+      playerCount: Object.values(r.players).filter((rp) => !rp.spectator).length, // [WATCH MODE] a watching host is not a player
       gameStarted: !!r.gameStarted,
       isHost: accountId ? r.pool.hostAccountId === accountId : false,
       // [POOL v2]
@@ -5201,7 +5201,7 @@ app.get("/admin/saboteur", requireAdmin, async (req, res) => {
 app.get("/admin/live-rooms", requireAdmin, (req, res) => {
   const list = Object.values(rooms).map((r) => ({
     code: r.code,
-    playerCount: Object.keys(r.players).length,
+    playerCount: Object.values(r.players).filter((rp) => !rp.spectator).length, // [WATCH MODE] a watching host is not a player
     gameStarted: !!r.gameStarted,
     winner: r.winner || null,
     isPublic: !!r.isPublic,
@@ -7812,7 +7812,22 @@ function stagePendingPointsForRoom(room) {
   Object.entries(room.players).forEach(([pid, p]) => {
     if (!p.accountId) { p.pendingPoints = 0; return; } // guest - never staged, never committed
     // [$SABOTEUR] + backed-vote results (right +5 / wrong -5), never below 0
-    if (p.spectator) { p.pendingPoints = 0; return; } // [POOL v2] a watching host earns nothing
+    if (p.spectator) { // [POOL v2] a watching host earns nothing - recorded as "watching", not as a loss
+      p.pendingPoints = 0; p.pendingWon = false;
+      p.pendingMeta = { role: "spectator", spectator: true, survived: false, matchId: room.currentMatchId || "" };
+      return;
+    }
+    // [MATCH HISTORY FIX] snapshot what this player did NOW - the first player
+    // back in the Lobby wipes role/alive/missions for the whole room, so
+    // everyone committing after them used to save an empty role, "out" and 0 missions.
+    p.pendingMeta = {
+      role: p.role || "", survived: !!p.alive, matchId: room.currentMatchId || "",
+      missionsDone: Math.max(p.missionsDone || 0, p.pendingMissionsDone || 0),
+      killsCount: p.killsCount || 0, meetingsSurvivedCount: p.meetingsSurvivedCount || 0,
+      sabotageActionsCount: p.sabotageActionsCount || 0, ventUsesCount: p.ventUsesCount || 0,
+      bonusMissionPoints: p.bonusMissionPoints || 0, bonusMissionDone: !!p.bonusMissionDone, bonusMissionResult: p.bonusMissionResult || null,
+    };
+
     p.pendingPoints = Math.max(0, computeMatchPoints(p, room.winner) + economy.backDelta(room, pid));
     p.pendingWon = p.role === room.winner;
     // [POOL GAMES] This is now the DEFINITIVE running total for this
@@ -8060,18 +8075,19 @@ async function commitPendingPoints(meta) {
       player.currentSeasonPoints = 0;
       player.seasonWeekStart = currentWeekStart;
     }
-    const isReducedMatch = POINTS.dailyLimitEnabled && player.pointsMatchesToday >= POINTS.dailyFullPointsMatches;
+    const isReducedMatch = !meta.spectator && POINTS.dailyLimitEnabled && player.pointsMatchesToday >= POINTS.dailyFullPointsMatches;
     const awardedPoints = isReducedMatch
       ? Math.round(matchPoints * POINTS.dailyReducedMultiplier)
       : matchPoints;
 
-    player.totalPoints += awardedPoints;
-    player.currentSeasonPoints += awardedPoints;
-    player.gamesPlayed += 1;
-    if (won) player.gamesWon += 1;
-    player.pointsMatchesToday += 1;
-
-    await player.save();
+    if (!meta.spectator) { // [WATCH MODE] watching a match isn't playing one
+      player.totalPoints += awardedPoints;
+      player.currentSeasonPoints += awardedPoints;
+      player.gamesPlayed += 1;
+      if (won) player.gamesWon += 1;
+      player.pointsMatchesToday += 1;
+      await player.save();
+    }
 
     // [POINTS SYSTEM STEP 2] Per-match history row - deliberately a
     // SEPARATE try/catch from the Player save above, so a failure here
@@ -8149,30 +8165,33 @@ async function commitPendingPointsForPlayer(room, socketId, extraFields = {}) {
   if (!me || typeof me.pendingPoints !== "number" || !me.accountId) return null;
   const awardPoints = me.pendingPoints;
   const awardWon = !!me.pendingWon;
+  const pm = me.pendingMeta || null; // [MATCH HISTORY FIX] taken when the match ended
   delete me.pendingPoints;
   delete me.pendingWon;
+  delete me.pendingMeta;
   return commitPendingPoints({
     accountId: me.accountId,
     matchPoints: awardPoints,
     won: awardWon,
-    matchId: room.currentMatchId || "",
+    spectator: !!(pm && pm.spectator),
+    matchId: (pm && pm.matchId) || room.currentMatchId || "",
     roomCode: room.code || "",
     playerName: me.name || "",
-    role: me.role || "",
-    missionsDone: me.missionsDone || 0,
-    killsCount: me.killsCount || 0,
-    meetingsSurvivedCount: me.meetingsSurvivedCount || 0,
-    sabotageActionsCount: me.sabotageActionsCount || 0,
-    ventUsesCount: me.ventUsesCount || 0,
-    survived: !!me.alive,
+    role: pm ? pm.role : (me.role || ""),
+    missionsDone: pm ? (pm.missionsDone || 0) : (me.missionsDone || 0),
+    killsCount: pm ? (pm.killsCount || 0) : (me.killsCount || 0),
+    meetingsSurvivedCount: pm ? (pm.meetingsSurvivedCount || 0) : (me.meetingsSurvivedCount || 0),
+    sabotageActionsCount: pm ? (pm.sabotageActionsCount || 0) : (me.sabotageActionsCount || 0),
+    ventUsesCount: pm ? (pm.ventUsesCount || 0) : (me.ventUsesCount || 0),
+    survived: pm ? !!pm.survived : !!me.alive,
     // [BUG FIX] See the schema field's own comment - these were being
     // tracked in-memory the whole time (and already correctly counted
     // toward matchPoints via computeMatchPoints) but never actually
     // persisted anywhere, so they could never be shown back to the
     // player afterward.
-    bonusMissionPoints: me.bonusMissionPoints || 0,
-    bonusMissionDone: !!me.bonusMissionDone,
-    bonusMissionResult: me.bonusMissionResult || null,
+    bonusMissionPoints: pm ? (pm.bonusMissionPoints || 0) : (me.bonusMissionPoints || 0),
+    bonusMissionDone: pm ? !!pm.bonusMissionDone : !!me.bonusMissionDone,
+    bonusMissionResult: pm ? (pm.bonusMissionResult || null) : (me.bonusMissionResult || null),
     poolId: room.pool ? room.pool.onChainPoolId : null,
     poolName: room.pool ? room.pool.poolName : null,
     isPoolGame: !!room.pool,
@@ -10219,7 +10238,7 @@ io.on("connection", (socket) => {
     // other causes. Rejecting the join outright here is what actually
     // prevents that from ever becoming possible again.
     const MAX_PLAYERS = 10;
-    if (Object.keys(room.players).length >= MAX_PLAYERS) {
+    if (Object.values(room.players).filter((rp) => !rp.spectator).length >= MAX_PLAYERS) { // [WATCH MODE] a watching host doesn't take a seat
       const message = "This room is full (max 10 players).";
       socket.emit("joinError", { message });
       ack({ ok: false, message });
@@ -10359,7 +10378,7 @@ io.on("connection", (socket) => {
       return;
     }
     const MAX_PLAYERS = 10;
-    if (Object.keys(room.players).length >= MAX_PLAYERS) {
+    if (Object.values(room.players).filter((rp) => !rp.spectator).length >= MAX_PLAYERS) { // [WATCH MODE] a watching host doesn't take a seat
       ack({ ok: false, message: "This room is full (max 10 players)." });
       return;
     }
@@ -10477,7 +10496,7 @@ io.on("connection", (socket) => {
     }
     const approvedTookHost = dropStaleSeatsForAccount(room, reqRec.accountId, reqRec.socketId); // [BUG FIX - DUPLICATE SEATS]
     const MAX_PLAYERS = 10;
-    if (Object.keys(room.players).length >= MAX_PLAYERS) {
+    if (Object.values(room.players).filter((rp) => !rp.spectator).length >= MAX_PLAYERS) { // [WATCH MODE] a watching host doesn't take a seat
       io.to(reqRec.socketId).emit("joinRequestRejected", { code: roomCode, message: "The room filled up before you were approved." });
       return;
     }
