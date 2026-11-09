@@ -130,6 +130,7 @@ if (MONGODB_URI) {
 // next steps (profile setup, wallet connect, points system), but
 // nothing in THIS step reads or writes them beyond their defaults.
 const playerSchema = new mongoose.Schema({
+  playPassPayerWallet: { type: String, default: null }, // [PLAY PASS - REAL NEAR] mainnet wallet this player proved they own (signed message)
   // [UPDATE - WALLET-BASED SIGNUP] No longer strictly required - a
   // player who signs up via "Continue with Wallet" has neither an email
   // nor a password at first. See the partial unique index below (same
@@ -2139,6 +2140,7 @@ function publicPlayer(p) {
     name: p.name,
     username: p.username,
     payoutWallet: p.payoutWallet || null, // [POOL v2] prefilled when joining a Real-NEAR pool
+    playPassPayerWallet: p.playPassPayerWallet || null, // [PLAY PASS - REAL NEAR]
     avatarId: p.avatarId,
     walletType: p.walletType,
     walletAddress: p.walletAddress,
@@ -3411,7 +3413,9 @@ app.get("/play-pass/config", async (req, res) => {
       priceNear: config.priceNear,
       discountPercent: config.discountPercent || 0,
       effectivePriceNear: effectivePlayPassPriceNear(config),
-      receivingAccountId: PLAY_PASS_RECEIVING_ACCOUNT_ID,
+      receivingAccountId: PLAY_PASS_MAINNET_RECEIVER,
+      network: "mainnet",
+      refundPolicy: "If your payment arrives but Play Pass isn't switched on, we send the NEAR back. Once Play Pass is active, purchases are final - no refunds.",
       variants: PREMIUM_AVATAR_VARIANTS,
       unlockGamesGap: config.unlockGamesGap || 2,
     });
@@ -3477,6 +3481,8 @@ app.post("/play-pass/purchase", async (req, res) => {
 
     const config = await getPlayPassConfig();
     if (!config.enabled) return res.status(403).json({ message: "Play Pass purchases are currently unavailable." });
+    // [PLAY PASS - REAL NEAR] the old test-NEAR purchase is closed - Play Pass is bought with real NEAR now
+    if (!process.env.PLAY_PASS_ALLOW_TESTNET) return res.status(410).json({ message: "Play Pass is now bought with real NEAR from your own wallet. Update the game and try again." });
 
     const nearAPI = await loadNearAPI();
     // [BUG FIX] near-api-js v7 dropped the old utils.format.parseNearAmount
@@ -4323,7 +4329,48 @@ async function getPoolsPaused() {
 // their next premium skin unlocks - admin-adjustable, see
 // /admin/play-pass/config below. The first skin unlocks immediately on
 // purchase (gap 0 for step 1), every subsequent skin costs one gap.
-const PLAY_PASS_DEFAULT_CONFIG = { priceNear: 5, discountPercent: 0, enabled: true, unlockGamesGap: 2 };
+const PLAY_PASS_DEFAULT_CONFIG = { priceNear: 1, discountPercent: 0, enabled: true, unlockGamesGap: 2 };
+// [PLAY PASS - REAL NEAR] Play Pass is paid in real NEAR on mainnet, straight
+// from the player's own wallet (HOT / Meteor / Intear - they approve it in
+// their wallet; the game never sees a key) to the game's official wallet.
+// The server only RECEIVES here - no key for this account lives on the server.
+const PLAY_PASS_MAINNET_RECEIVER = process.env.PLAY_PASS_MAINNET_RECEIVER || "saboteur.near";
+const MAINNET_RPC_URLS = ["https://free.rpc.fastnear.com", "https://rpc.mainnet.near.org"];
+const playPassPurchaseSchema = new mongoose.Schema({
+  playerId: { type: String, index: true },
+  playerName: String,
+  payerAccountId: String,                              // the player's mainnet wallet that paid
+  txHash: { type: String, unique: true, index: true }, // one transaction can only ever be used once
+  amountNear: Number,                                  // what actually arrived
+  priceNear: Number,                                   // the price at that moment
+  status: { type: String, enum: ["granted", "needs_refund", "refunded"], index: true },
+  reason: String,                                      // why a refund is owed
+  refundTxHash: String,
+  refundedAt: Date,
+  createdAt: { type: Date, default: Date.now, index: true },
+});
+const PlayPassPurchase = mongoose.models.PlayPassPurchase || mongoose.model("PlayPassPurchase", playPassPurchaseSchema);
+// Reads a mainnet transaction and reports exactly what it did. Never trusts the client.
+async function readMainnetTransfer(txHash, payerAccountId) {
+  let lastErr = "Could not reach the NEAR network.";
+  for (const rpcUrl of MAINNET_RPC_URLS) {
+    try {
+      const r = await fetch(rpcUrl, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
+        jsonrpc: "2.0", id: "pp", method: "tx", params: { tx_hash: txHash, sender_account_id: payerAccountId, wait_until: "FINAL" },
+      }) });
+      const j = await r.json();
+      if (j.error) { lastErr = j.error.cause?.name === "UNKNOWN_TRANSACTION" ? "That transaction isn't on mainnet (yet). Wait a few seconds and try again." : (j.error.message || "RPC error"); continue; }
+      const res = j.result;
+      const st = res?.status || {};
+      const succeeded = Object.prototype.hasOwnProperty.call(st, "SuccessValue") || Object.prototype.hasOwnProperty.call(st, "SuccessReceiptId");
+      const tx = res?.transaction || {};
+      const transfer = (tx.actions || []).find((a) => a && a.Transfer);
+      const yocto = transfer ? BigInt(transfer.Transfer.deposit || "0") : 0n;
+      return { ok: true, succeeded, signer: tx.signer_id, receiver: tx.receiver_id, yocto };
+    } catch (e) { lastErr = e.message; }
+  }
+  return { ok: false, error: lastErr };
+}
 let playPassConfigCache = { ...PLAY_PASS_DEFAULT_CONFIG };
 async function getPlayPassConfig() {
   try {
@@ -5319,6 +5366,121 @@ app.post("/admin/players/:id/revoke-premium", requireAdmin, requireFullAdmin, as
 // ============================================================
 
 // ---- GET / UPDATE PLAY PASS CONFIG (price, discount, on/off) ----
+// [PLAY PASS - REAL NEAR] Player paid from their own mainnet wallet; check it
+// on-chain and switch Play Pass on. Safe to call again with the same tx.
+// [PLAY PASS - REAL NEAR] The player proves a mainnet wallet is theirs by
+// signing a one-time message with it. Only that wallet's payments count for
+// them - so nobody can claim someone else's transfer.
+app.post("/play-pass/link-wallet", async (req, res) => {
+  try {
+    const sessionToken = String(req.body.sessionToken || "").trim();
+    const player = sessionToken ? await Player.findOne({ sessionToken, verified: true }) : null;
+    if (!player) return res.status(401).json({ message: "Please log in again." });
+    const accountId = String(req.body.accountId || "").trim().toLowerCase();
+    const publicKey = String(req.body.publicKey || "").trim();
+    const signature = String(req.body.signature || "").trim();
+    const nonceBase64 = String(req.body.nonce || "").trim();
+    if (!accountId || !publicKey || !signature || !nonceBase64) return res.status(400).json({ message: "Missing signature data." });
+    const v = await verifyWalletSignature({ accountId, publicKey, signature, nonceBase64, message: WALLET_SIGN_MESSAGE });
+    if (!v.ok) return res.status(401).json({ message: v.error });
+    player.playPassPayerWallet = accountId;
+    await player.save();
+    res.json({ success: true, wallet: accountId });
+  } catch (e) {
+    console.error("[PLAY PASS] link-wallet error:", e.message);
+    res.status(500).json({ message: "Couldn't verify your wallet right now. Try again." });
+  }
+});
+
+app.post("/play-pass/purchase-mainnet", async (req, res) => {
+  try {
+    const sessionToken = String(req.body.sessionToken || "").trim();
+    const player = sessionToken ? await Player.findOne({ sessionToken, verified: true }) : null;
+    if (!player) return res.status(401).json({ message: "Please log in again." });
+    const txHash = String(req.body.txHash || "").trim();
+    const payer = String(req.body.payerAccountId || "").trim().toLowerCase();
+    if (!/^[1-9A-HJ-NP-Za-km-z]{43,44}$/.test(txHash)) return res.status(400).json({ message: "That doesn't look like a NEAR transaction hash." });
+    if (!payer) return res.status(400).json({ message: "Missing the wallet that paid." });
+    if (!player.playPassPayerWallet || player.playPassPayerWallet !== payer) return res.status(403).json({ message: "Confirm this wallet is yours first (sign the message in your wallet), then try again." });
+
+    const existing = await PlayPassPurchase.findOne({ txHash });
+    if (existing) {
+      if (existing.playerId !== String(player._id)) return res.status(409).json({ message: "That payment was already used by another account." });
+      const hasPass = !!(player.premiumUntil && player.premiumUntil.getTime() > Date.now());
+      return res.json({ success: existing.status === "granted", hasPlayPass: hasPass, status: existing.status, message: existing.status === "granted" ? "Play Pass is active." : "This payment is waiting for a refund." });
+    }
+
+    const tx = await readMainnetTransfer(txHash, payer);
+    if (!tx.ok) return res.status(502).json({ message: tx.error });
+    if (!tx.succeeded) return res.status(400).json({ message: "That transaction failed on-chain, so no NEAR was sent." });
+    if (tx.signer !== payer) return res.status(400).json({ message: "That transaction wasn't sent from your wallet." });
+    if (tx.receiver !== PLAY_PASS_MAINNET_RECEIVER || tx.yocto <= 0n) return res.status(400).json({ message: `That transaction didn't send NEAR to ${PLAY_PASS_MAINNET_RECEIVER}.` });
+
+    const nearAPI = await loadNearAPI();
+    const config = await getPlayPassConfig();
+    const price = effectivePlayPassPriceNear(config);
+    const amountNear = Number(nearAPI.yoctoToNear(tx.yocto, 5));
+    const hadPass = !!(player.premiumUntil && player.premiumUntil.getTime() > Date.now());
+    let reason = null;
+    if (hadPass) reason = "you already had Play Pass";
+    else if (!config.enabled) reason = "Play Pass sales were switched off";
+    else if (tx.yocto < BigInt(nearAPI.nearToYocto(String(price)))) reason = `paid ${amountNear} NEAR, the price was ${price} NEAR`;
+
+    const base = { playerId: String(player._id), playerName: player.name || player.username || "", payerAccountId: payer, txHash, amountNear, priceNear: price };
+    if (reason) {
+      await PlayPassPurchase.create({ ...base, status: "needs_refund", reason });
+      sendInboxMessage(player._id, {
+        title: "We received your payment — refund on the way",
+        body: `${amountNear} NEAR arrived from ${payer}, but Play Pass couldn't be switched on (${reason}). We'll send it back to ${payer}. You'll get a message when it's sent.`,
+        nameTag: "Play Pass",
+      });
+      logAdminAction("play-pass-needs-refund", { playerId: base.playerId, txHash, reason });
+      return res.status(402).json({ message: `Payment received, but Play Pass couldn't be switched on (${reason}). Your ${amountNear} NEAR will be sent back to ${payer}.`, status: "needs_refund" });
+    }
+    await PlayPassPurchase.create({ ...base, status: "granted" });
+    player.premiumUntil = new Date("2099-12-31");
+    player.playPassSource = "purchased";
+    player.playPassTxHash = txHash;
+    player.playPassPricePaidNear = amountNear;
+    player.playPassStartGamesPlayed = player.gamesPlayed || 0;
+    await player.save();
+    sendInboxMessage(player._id, {
+      title: "Play Pass activated!",
+      body: `Thanks! ${amountNear} NEAR received from ${payer}. Your premium skins, GIFs, gold name and 2x $SABOTEUR rewards are on. Purchases are final once Play Pass is active.`,
+      nameTag: "Play Pass",
+    });
+    logAdminAction("play-pass-purchased", { playerId: base.playerId, playerName: base.playerName, txHash, amountNear, payer });
+    res.json({ success: true, hasPlayPass: true, status: "granted" });
+  } catch (err) {
+    if (err && err.code === 11000) return res.status(409).json({ message: "That payment was already used." });
+    console.error("[PLAY PASS] purchase-mainnet error:", err.message);
+    res.status(500).json({ message: "Something went wrong checking your payment. Your NEAR is safe - try again in a moment." });
+  }
+});
+
+// [PLAY PASS - REAL NEAR] every real purchase, and the ones still owed a refund
+app.get("/admin/play-pass/purchases", requireAdmin, async (req, res) => {
+  try {
+    const q = req.query.status ? { status: String(req.query.status) } : {};
+    const rows = await PlayPassPurchase.find(q).sort({ createdAt: -1 }).limit(200).lean();
+    const owed = await PlayPassPurchase.countDocuments({ status: "needs_refund" });
+    const total = await PlayPassPurchase.aggregate([{ $match: { status: "granted" } }, { $group: { _id: null, n: { $sum: 1 }, near: { $sum: "$amountNear" } } }]);
+    res.json({ success: true, receiver: PLAY_PASS_MAINNET_RECEIVER, refundsOwed: owed, sold: total[0]?.n || 0, revenueNear: Math.round((total[0]?.near || 0) * 1e5) / 1e5, rows });
+  } catch (e) { res.status(500).json({ message: "Failed to load purchases." }); }
+});
+app.post("/admin/play-pass/purchases/:id/refunded", requireAdmin, requireFullAdmin, async (req, res) => {
+  try {
+    const row = await PlayPassPurchase.findById(req.params.id);
+    if (!row) return res.status(404).json({ message: "Purchase not found." });
+    if (row.status !== "needs_refund") return res.status(400).json({ message: "This purchase isn't waiting for a refund." });
+    row.status = "refunded"; row.refundedAt = new Date(); row.refundTxHash = String(req.body.refundTxHash || "").trim().slice(0, 64) || null;
+    await row.save();
+    sendInboxMessage(row.playerId, { title: "Your refund was sent", body: `${row.amountNear} NEAR was sent back to ${row.payerAccountId}.${row.refundTxHash ? ` Transaction: ${row.refundTxHash}` : ""}`, nameTag: "Play Pass" });
+    logAdminAction("play-pass-refunded", { id: String(row._id), refundTxHash: row.refundTxHash });
+    res.json({ success: true, row });
+  } catch (e) { res.status(500).json({ message: "Failed to mark refunded." }); }
+});
+
 app.get("/admin/play-pass/config", requireAdmin, async (req, res) => {
   try {
     const config = await getPlayPassConfig();

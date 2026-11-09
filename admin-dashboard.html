@@ -279,6 +279,18 @@
         <button class="btn primary" onclick="savePlayPassConfig()">Save settings</button>
         <button class="tab-btn" style="margin-left:8px;" data-tab="announcements" onclick="document.querySelector('.tab-btn[data-tab=announcements]').click()">Post Play Pass announcement →</button>
       </div>
+      <div class="card" style="margin-top:14px;">
+        <h3 style="color:#ffd75e;">Real NEAR purchases (mainnet)</h3>
+        <div id="ppSalesSummary" style="font-size:12.5px;color:#c8d0cc;margin-bottom:10px;">Loading…</div>
+        <div style="display:flex;gap:6px;margin-bottom:10px;">
+          <button class="tab-btn" onclick="loadPlayPassPurchases('needs_refund')">Refunds owed</button>
+          <button class="tab-btn" onclick="loadPlayPassPurchases('granted')">Sold</button>
+          <button class="tab-btn" onclick="loadPlayPassPurchases('refunded')">Refunded</button>
+          <button class="tab-btn" onclick="loadPlayPassPurchases('')">All</button>
+        </div>
+        <div id="ppPurchasesWrap"></div>
+        <div style="font-size:11px;color:#9aa0ad;margin-top:8px;">Refunds are sent by you from the official wallet (the server never holds its key). Send the NEAR back to the payer wallet shown, then press "Mark refunded" and paste the refund transaction hash — the player gets an Inbox message.</div>
+      </div>
       <div class="card full-only" style="margin-top:14px;">
         <h3 style="color:#ffd75e;">Gift Play Pass to a player</h3>
         <div class="field-label">Player</div>
@@ -1274,7 +1286,30 @@
 
   // ---------- Play Pass tab ----------
   let ppHoldersPage = 1, ppHoldersSearchTimer = null, ppGiftSearchTimer = null;
+  // [PLAY PASS - REAL NEAR] sales + refunds owed
+  const ppEsc = (t) => String(t == null ? '' : t).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  window.loadPlayPassPurchases = async function (status) {
+    try {
+      const d = await apiFetch('/admin/play-pass/purchases' + (status ? `?status=${encodeURIComponent(status)}` : ''));
+      document.getElementById('ppSalesSummary').innerHTML = `Paid to <b style="color:#ffd75e">${ppEsc(d.receiver)}</b> · <b>${d.sold}</b> sold · <b>${d.revenueNear}</b> NEAR received · <b style="color:${d.refundsOwed ? '#ff8a8a' : '#6effc0'}">${d.refundsOwed} refund${d.refundsOwed === 1 ? '' : 's'} owed</b>`;
+      const rows = d.rows || [];
+      document.getElementById('ppPurchasesWrap').innerHTML = rows.length ? `<table><thead><tr><th>When</th><th>Player</th><th>Paid from</th><th>NEAR</th><th>Status</th><th>Tx</th><th></th></tr></thead><tbody>${rows.map((r) => `
+        <tr><td>${new Date(r.createdAt).toLocaleString()}</td><td>${ppEsc(r.playerName)}</td><td>${ppEsc(r.payerAccountId)}</td><td>${r.amountNear}</td>
+        <td style="color:${r.status === 'needs_refund' ? '#ff8a8a' : r.status === 'granted' ? '#6effc0' : '#6ec8ff'}">${r.status.replace('_', ' ')}${r.reason ? `<br><small style="color:#9aa0ad">${ppEsc(r.reason)}</small>` : ''}</td>
+        <td><a href="https://nearblocks.io/txns/${ppEsc(r.txHash)}" target="_blank" rel="noreferrer">view</a>${r.refundTxHash ? ` · <a href="https://nearblocks.io/txns/${ppEsc(r.refundTxHash)}" target="_blank" rel="noreferrer">refund</a>` : ''}</td>
+        <td>${r.status === 'needs_refund' ? `<button class="btn" onclick="markPlayPassRefunded('${ppEsc(r._id)}')">Mark refunded</button>` : ''}</td></tr>`).join('')}</tbody></table>` : '<div style="color:#9aa0ad;font-size:12px;">Nothing here.</div>';
+    } catch (e) { handleAuthError(e); }
+  };
+  window.markPlayPassRefunded = async function (id) {
+    const tx = prompt('Paste the refund transaction hash (from your wallet):');
+    if (tx === null) return;
+    try {
+      await apiFetch(`/admin/play-pass/purchases/${encodeURIComponent(id)}/refunded`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ refundTxHash: tx.trim() }) });
+      loadPlayPassPurchases('needs_refund');
+    } catch (e) { handleAuthError(e); alert(e.message || 'Failed'); }
+  };
   async function loadPlayPassConfig() {
+    loadPlayPassPurchases('');
     try {
       const d = await apiFetch('/admin/play-pass/config');
       document.getElementById('ppPrice').value = d.priceNear;
