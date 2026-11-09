@@ -2125,8 +2125,9 @@ async function findActingPlayer(req) {
       return bySession;
     }
   }
-  const email = String(req.body.email || "").trim().toLowerCase();
-  if (email) return Player.findOne({ email, verified: true });
+  // [SECURITY FIX] No more email-only fallback: knowing someone's email was
+  // enough to replace their wallet, change their profile or buy on their
+  // behalf. Every current client call sends its session token.
   return null;
 }
 
@@ -2662,12 +2663,14 @@ app.post("/auth/reset-password", async (req, res) => {
 // this or any other endpoint.
 app.post("/wallet/connect", async (req, res) => {
   try {
-    const email = String(req.body.email || "").trim().toLowerCase();
+    // [SECURITY FIX] Used to need only an email - anyone could point another
+    // player's prizes at their own wallet. Now the account's session is required.
     const walletAddress = String(req.body.walletAddress || "").trim();
     if (!walletAddress) {
       return res.status(400).json({ message: "Missing wallet address." });
     }
-    const player = await Player.findOne({ email, verified: true });
+    const sessionToken = String(req.body.sessionToken || "").trim();
+    const player = sessionToken ? await Player.findOne({ sessionToken, verified: true }) : null;
     if (!player) {
       return res.status(404).json({ message: "Account not found." });
     }
@@ -2679,7 +2682,7 @@ app.post("/wallet/connect", async (req, res) => {
     // Player records sharing one walletAddress breaks every off-chain
     // "is this account the participant/host of this pool" check that
     // looks accounts up by wallet address.
-    const walletOwner = await Player.findOne({ walletAddress, email: { $ne: email } });
+    const walletOwner = await Player.findOne({ walletAddress, _id: { $ne: player._id } });
     if (walletOwner) {
       return res.status(409).json({ message: "That wallet is already connected to a different account." });
     }
