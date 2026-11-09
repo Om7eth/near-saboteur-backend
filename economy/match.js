@@ -21,6 +21,7 @@ const ledgerSchema = new mongoose.Schema({
   backs: { type: [{ target: String, correct: Boolean, delta: Number }], default: [] },
   multiplier: Number,
   reducedForDay: Boolean,
+  playPass: Boolean,                         // reward doubled for a Play Pass holder
   toBotTreasury: Boolean,                    // bot was over its cap: paid to the Bot Treasury
   amount: Number,                            // whole $SABOTEUR
   status: { type: String, enum: ["pending", "sent", "failed", "skipped"], default: "pending", index: true },
@@ -113,7 +114,9 @@ async function settleMatch({ io, roomCode, room, computePoints, hasDb }) {
       if (!p.isBot && !p.accountId && RULES.noRewardForGuests) eligible = false;
       const reducedForDay = !p.isBot && (todayCounts[p.accountId] || 0) >= RULES.dailyFullMatches;
       r.reducedForDay = reducedForDay;
+      r.playPass = !p.isBot && !!p.accountId && !!p.hasPlayPass;
       r.amount = eligible ? rewardFor(r.rank, humans, { reducedForDay }) : 0;
+      if (r.playPass && r.amount > 0) r.amount = Math.round(r.amount * (RULES.playPassMultiplier || 1) * 100) / 100;
       r.toBotTreasury = !!(p.isBot && T.BOT_TREASURY && (botEarned[p.name] || 0) >= RULES.botBalanceCap);
       r.wallet = !T.configured() || !eligible ? null : (p.isBot ? (r.toBotTreasury ? T.BOT_TREASURY : T.walletForBot(p.name)) : T.walletForPlayer(p.accountId));
       r.holderType = holderType;
@@ -126,7 +129,7 @@ async function settleMatch({ io, roomCode, room, computePoints, hasDb }) {
       rows: rows.map((r) => ({
         id: r.id, name: r.p.name, isBot: !!r.p.isBot, guest: r.guest, rank: r.rank, points: r.points,
         backs: r.backs, backDelta: r.backs.reduce((s, b) => s + b.delta, 0),
-        tokens: r.amount, reducedForDay: !!r.reducedForDay, wallet: r.wallet,
+        tokens: r.amount, reducedForDay: !!r.reducedForDay, playPass: !!r.playPass, wallet: r.wallet,
       })),
     });
 
@@ -134,7 +137,7 @@ async function settleMatch({ io, roomCode, room, computePoints, hasDb }) {
     const docs = await TokenLedger.insertMany(rows.filter((r) => r.holderId).map((r) => ({
       matchId, roomCode, holderType: r.holderType, holderId: r.holderId, name: r.p.name, wallet: r.wallet,
       rank: r.rank, players: rows.length, humans, points: r.points, backs: r.backs, multiplier: mult,
-      reducedForDay: !!r.reducedForDay, toBotTreasury: !!r.toBotTreasury, amount: r.amount, status: r.amount > 0 && r.wallet ? "pending" : "skipped",
+      reducedForDay: !!r.reducedForDay, playPass: !!r.playPass, toBotTreasury: !!r.toBotTreasury, amount: r.amount, status: r.amount > 0 && r.wallet ? "pending" : "skipped",
     }))).catch((e) => { console.warn("[SABOTEUR] ledger write failed:", e.message); return []; });
 
     payPending(docs.filter((d) => d.status === "pending"), matchId);

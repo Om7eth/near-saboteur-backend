@@ -54,6 +54,9 @@ const RULES = {
   // Bot Treasury (bots.<parent>) - for NEAR AI credits,
   // game improvements, airdrops or campaigns, decided by the game owner.
   botsEarn: true,
+  // Play Pass holders earn this many times the normal match reward. Testnet
+  // tokens only - no value today and no promise about the future.
+  playPassMultiplier: 2,
   // A bot backs its vote only with real evidence from its memory (saw the
   // kill, or found the body next to someone). A saboteur bot sometimes
   // backs its scapegoat to look confident.
