@@ -4014,8 +4014,13 @@ app.post("/pools/manual/:poolId/paid", async (req, res) => {
     if (!account) return res.status(401).json({ message: "Sign in again." });
     const m = await ManualPool.findOne({ poolId: String(req.params.poolId) });
     if (!m || m.hostAccountId !== String(account.accountId)) return res.status(404).json({ message: "Pool not found." });
+    // [TIE FIX] Tied players share a rank (e.g. two #2s), so a winner is
+    // identified by their account - rank alone always found the first one.
     const rank = parseInt(req.body.rank, 10);
-    const w = (m.winners || []).find((x) => x.rank === rank);
+    const who = req.body.accountId ? String(req.body.accountId) : null;
+    const sameRank = (m.winners || []).filter((x) => x.rank === rank);
+    const w = who ? (m.winners || []).find((x) => x.accountId === who)
+      : (sameRank.find((x) => !x.paidAt) || sameRank[0]); // older apps: first unpaid at that rank
     if (!w) return res.status(400).json({ message: "No winner at that rank." });
     const txNote = String(req.body.txHash || "").trim().slice(0, 120);
     // [FUNDS SAFETY] If the host gives a transaction hash, check it on
