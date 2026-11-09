@@ -5918,7 +5918,24 @@ app.post("/admin/custom-avatar-request/:id/reply", requireAdmin, requireFullAdmi
 // [NEW FEATURE - ADMIN OVERVIEW] Expanded from the original 5 numbers -
 // mode breakdown, 24h active players, and the funds-needing-attention
 // count all in one place.
+// [ADMIN SPEED] The sidebar badges only need a few counts - this is what
+// every page refreshes, instead of the heavy overview below.
+app.get("/admin/counts", requireAdmin, async (req, res) => {
+  try {
+    const [refundsOwed, needsAttentionCount, openReports, customAvatarPending] = await Promise.all([
+      PlayPassPurchase.countDocuments({ status: "needs_refund" }).catch(() => 0),
+      PoolRecord.countDocuments(fundsNeedsAttentionFilter()).catch(() => 0),
+      PlayerReport.countDocuments({ status: "open" }).catch(() => 0),
+      CustomAvatarRequest.countDocuments({ status: "submitted" }).catch(() => 0),
+    ]);
+    res.json({ network: NEAR_NETWORK, activeRooms: Object.keys(rooms).length, refundsOwed, needsAttentionCount, openReports, customAvatarPending });
+  } catch (e) { res.status(500).json({ message: "Failed to load counts." }); }
+});
+// [ADMIN SPEED] the overview scans every match record - reuse it for 20s
+let adminOverviewCache = null;
 app.get("/admin/overview", requireAdmin, async (req, res) => {
+  if (adminOverviewCache && Date.now() - adminOverviewCache.at < 20000) return res.json(adminOverviewCache.body);
+  const send = (body) => { adminOverviewCache = { at: Date.now(), body }; res.json(body); };
   try {
     const startOfToday = new Date();
     startOfToday.setUTCHours(0, 0, 0, 0);
@@ -5960,7 +5977,7 @@ app.get("/admin/overview", requireAdmin, async (req, res) => {
     const openOrLockedPools = Object.values(rooms).filter((r) => r.pool && (r.pool.state === "Open" || r.pool.state === "Locked")).length;
     const poolGamesCreated = poolRecordsByFunding.find((g) => g._id === true)?.n || 0;
     const paidGamesCreated = poolRecordsByFunding.find((g) => g._id === false)?.n || 0;
-    res.json({
+    send({
       network: NEAR_NETWORK,
       totalPlayers, totalMatches, matchesToday,
       activeRooms, activeGames, openOrLockedPools,
@@ -6513,8 +6530,23 @@ async function scanChainOrphans() {
   const out = [];
   let misses = 0;
   const records = new Map((await PoolRecord.find({}, "onChainPoolId matchesPlayed state createdAt roomCode poolName").lean()).map((r) => [String(r.onChainPoolId), r]));
-  for (let id = 1; misses < 5 && id < 5000; id += 5) {
-    const batch = await Promise.all([0, 1, 2, 3, 4].map((k) => viewContract("get_pool", { pool_id: id + k })));
+  // get_pool returns null for a pool that doesn't exist; a network error must
+  // NOT look like that (it would end the scan early), so errors are retried
+  // and, if they persist, abort the scan instead of returning a partial list.
+  const nearAPI = await loadNearAPI();
+  const fallback = NEAR_NETWORK === "mainnet" ? "https://free.rpc.fastnear.com" : "https://test.rpc.fastnear.com";
+  const providers = [...new Set([fallback, NEAR_RPC_URL])].map((url) => new nearAPI.JsonRpcProvider({ url })); // fastnear first: much higher rate limit
+  const getPool = async (pool_id) => {
+    for (let t = 0; t < 6; t++) {
+      try { return await providers[t % providers.length].callFunction({ contractId: POOL_CONTRACT_ACCOUNT_ID, method: "get_pool", args: { pool_id } }); }
+      catch (e) { await new Promise((r) => setTimeout(r, 700 * (t + 1))); }
+    }
+    throw new Error(`couldn't read pool #${pool_id} from the network - try again`);
+  };
+  if (!POOL_CONTRACT_ACCOUNT_ID) return out;
+  // a few at a time - public RPCs rate-limit big bursts
+  for (let id = 1; misses < 5 && id < 5000; id += 3) {
+    const batch = await Promise.all([0, 1, 2].map((k) => getPool(id + k)));
     for (const p of batch) {
       if (!p) { misses++; continue; }
       misses = 0;
@@ -6533,8 +6565,21 @@ async function scanChainOrphans() {
   }
   return out;
 }
+// The scan reads every pool from a public RPC, so it's slow: keep the last
+// result for 3 minutes, share one running scan, and ?fresh=1 forces a new one.
+let chainScan = { at: 0, pools: null, running: null };
 app.get("/admin/pools/chain-orphans", requireAdmin, async (req, res) => {
-  try { res.json({ success: true, pools: await scanChainOrphans() }); }
+  try {
+    const fresh = req.query.fresh === "1";
+    if (!fresh && chainScan.pools && Date.now() - chainScan.at < 3 * 60 * 1000) return res.json({ success: true, pools: chainScan.pools, scannedAt: chainScan.at });
+    if (!chainScan.running) {
+      chainScan.running = scanChainOrphans()
+        .then((pools) => { chainScan = { at: Date.now(), pools, running: null }; return pools; })
+        .catch((e) => { chainScan.running = null; throw e; });
+    }
+    const pools = await chainScan.running;
+    res.json({ success: true, pools, scannedAt: chainScan.at });
+  }
   catch (e) { res.status(500).json({ message: "Couldn't scan the contract: " + e.message }); }
 });
 app.post("/admin/pools/chain-orphans/:onChainPoolId/resolve", requireAdmin, requireFullAdmin, async (req, res) => {
@@ -6544,6 +6589,7 @@ app.post("/admin/pools/chain-orphans/:onChainPoolId/resolve", requireAdmin, requ
     const rec = await PoolRecord.findOne({ onChainPoolId: key });
     const result = rec ? await reconcileOnePool(rec, { force: true }) : { action: "refund", outcome: await cancelPoolOnChain(key) };
     logAdminAction("pool-orphan-resolved", { onChainPoolId: key, action: result.action || null, ok: !!(result.outcome && result.outcome.success) });
+    if (chainScan.pools) chainScan.pools = chainScan.pools.filter((p) => p.onChainPoolId !== key || !(result.outcome && result.outcome.success));
     res.json({ success: true, result });
   } catch (e) { res.status(500).json({ message: "Couldn't resolve that pool: " + e.message }); }
 });

@@ -328,6 +328,7 @@ async function load(first) {
   if (!busy) {
     try {
       const scroll = $('#content').scrollTop;
+      if (first) $('#content').innerHTML = '<div class="empty">Loading…</div>'; // show something right away
       await R[page]($('#content'), first);
       if (!first) $('#content').scrollTop = scroll;
       lastLoad = Date.now();
@@ -339,8 +340,7 @@ async function load(first) {
 setInterval(() => { $('#upd').textContent = lastLoad ? `updated ${when(lastLoad).replace('just now', 'now')}` : ''; }, 5000);
 async function refreshCounts() {
   try {
-    const d = await api('/admin/overview');
-    STATE.overview = d;
+    const d = await api('/admin/counts');
     STATE.counts = { attention: (d.refundsOwed || 0) + (d.needsAttentionCount || 0) + (d.openReports || 0) + (d.customAvatarPending || 0), live: d.activeRooms, refunds: d.refundsOwed, pools: d.needsAttentionCount, reports: d.openReports, avatars: d.customAvatarPending };
     NET = d.network || NET;
     $('#netPill').textContent = NET.toUpperCase(); $('#netPill').className = 'pill ' + (NET === 'mainnet' ? 'main' : 'live');
@@ -352,7 +352,7 @@ async function refreshCounts() {
 const R = {};
 
 R.overview = async (el) => {
-  await refreshCounts();
+  const ov = await api('/admin/overview'); STATE.overview = ov; refreshCounts();
   const d = STATE.overview || {};
   const [db, set] = await Promise.all([api('/admin/db-stats').catch(() => null), api('/admin/settings').catch(() => ({}))]);
   const max = Math.max(1, ...(d.matchesByDay || []).map((x) => x.matches));
@@ -399,7 +399,7 @@ ACT.pause = async () => {
 };
 
 R.live = async (el) => {
-  await refreshCounts();
+  refreshCounts(); // badges update in the background - never hold the page
   if (param) return R.liveRoom(el);
   const d = await api('/admin/live-rooms');
   el.innerHTML = d.rooms.length ? `<div class="card" style="padding:8px 10px"><div class="tbl"><table><tr><th>ROOM</th><th>STATUS</th><th>PLAYERS</th><th></th></tr>${d.rooms.map((r) => `
@@ -490,7 +490,7 @@ ACT.rm = (r) => go('rooms', r.dataset.id);
 /* play pass */
 let ppQ = { status: 'needs_refund', hpage: 1, hsearch: '' };
 R.playpass = async (el, first) => {
-  await refreshCounts();
+  refreshCounts(); // badges update in the background - never hold the page
   const [cfg, pur, hold] = await Promise.all([api('/admin/play-pass/config'), api('/admin/play-pass/purchases' + (ppQ.status ? `?status=${ppQ.status}` : '')), api(`/admin/play-pass/holders?page=${ppQ.hpage}&search=${encodeURIComponent(ppQ.hsearch)}`)]);
   const editing = !first && $('#ppPrice') && document.activeElement && /pp(Price|Disc|Gap)/.test(document.activeElement.id);
   const sales = `<div class="card"><h3>REAL NEAR SALES <span class="r">${num(pur.sold)} sold · ${near(pur.revenueNear)} NEAR → ${esc(pur.receiver)}</span></h3>
@@ -536,7 +536,7 @@ ACT.ppGiftFind = async () => {
 /* pools */
 let poQ = { tab: 'pools', filter: '', page: 1, tpage: 1, ttype: '', tsearch: '', legacy: 1 };
 R.pools = async (el, first) => {
-  await refreshCounts();
+  refreshCounts(); // badges update in the background - never hold the page
   const tabs = `<div class="chips">${[['pools', 'Pools'], ['tx', 'Transactions'], ['legacy', 'Older pools'], ['chain', 'On-chain check']].map(([k, t]) => `<button class="chip ${poQ.tab === k ? 'on' : ''}" data-act="poT" data-k="${k}">${t}</button>`).join('')}</div>`;
   if (poQ.tab === 'tx') {
     const types = [['', 'All'], ['participate', 'Entries'], ['distribute_prizes', 'Prizes'], ['platform_fee', 'Fees'], ['refund_participant', 'Refunds'], ['cancel_pool', 'Cancelled'], ['create_pool', 'Created'], ['lock_participation', 'Started']];
@@ -547,10 +547,21 @@ R.pools = async (el, first) => {
     return;
   }
   if (poQ.tab === 'chain') {
-    el.innerHTML = `${tabs}<p class="muted" style="margin:0 0 10px">Reads every pool straight from the contract and lists the ones still holding test NEAR with no live room — including old pools from before tracking existed. Takes a few seconds.</p><div id="chL" class="empty">Scanning the contract…</div>`;
-    const d = await api('/admin/pools/chain-orphans');
-    const total = d.pools.reduce((a, p) => a + p.totalNear, 0);
-    $('#chL').outerHTML = d.pools.length ? `<div class="card" style="padding:8px 10px"><div style="margin-bottom:8px"><b style="color:var(--g)">${d.pools.length} pool${d.pools.length === 1 ? '' : 's'} · ${Math.round(total * 1000) / 1000} tNEAR</b> <small class="muted">still held in the contract</small></div><div class="tbl"><table><tr><th>POOL</th><th>STATE</th><th>TYPE</th><th>NEAR</th><th>PLAYERS</th><th>WHAT RESOLVE DOES</th><th></th></tr>${d.pools.map((p) => `<tr><td class="mono">#${esc(p.onChainPoolId)} ${esc(p.name || '')}</td><td>${esc(p.state)}${p.tracked ? '' : ' <span class="tag dim">untracked</span>'}</td><td>${p.hostFunded ? 'Pool' : 'Paid'}</td><td>${near(p.totalNear)}</td><td>${p.participants.length}</td><td class="muted" style="font-size:12px">${esc(p.action)}</td><td style="text-align:right">${guard(`<button class="btn red" data-act="chRes" data-p="${esc(p.onChainPoolId)}" data-w="${esc(p.action)}">Resolve</button>`)}</td></tr>`).join('')}</table></div></div>` : '<div class="empty">Nothing stuck in the contract. 🎉</div>';
+    // The scan reads every pool from the contract (slow), so auto-refresh
+    // re-uses the last result instead of rescanning; Rescan / Resolve do a fresh one.
+    const intro = `<div class="row" style="justify-content:space-between;margin:0 0 10px"><p class="muted" style="margin:0">Reads every pool straight from the contract and lists the ones still holding test NEAR with no live room — including old pools from before tracking existed.</p><button class="btn ghost" data-act="chScan">Rescan</button></div>`;
+    const table = (d) => {
+      const total = d.pools.reduce((a, p) => a + p.totalNear, 0);
+      return d.pools.length ? `<div class="card" style="padding:8px 10px"><div style="margin-bottom:8px"><b style="color:var(--g)">${d.pools.length} pool${d.pools.length === 1 ? '' : 's'} · ${Math.round(total * 1000) / 1000} tNEAR</b> <small class="muted">still held in the contract</small></div><div class="tbl"><table><tr><th>POOL</th><th>STATE</th><th>TYPE</th><th>NEAR</th><th>PLAYERS</th><th>WHAT RESOLVE DOES</th><th></th></tr>${d.pools.map((p) => `<tr><td class="mono">#${esc(p.onChainPoolId)} ${esc(p.name || '')}</td><td>${esc(p.state)}${p.tracked ? '' : ' <span class="tag dim">untracked</span>'}</td><td>${p.hostFunded ? 'Pool' : 'Paid'}</td><td>${near(p.totalNear)}</td><td>${p.participants.length}</td><td class="muted" style="font-size:12px">${esc(p.action)}</td><td style="text-align:right">${guard(`<button class="btn red" data-act="chRes" data-p="${esc(p.onChainPoolId)}" data-w="${esc(p.action)}">Resolve</button>`)}</td></tr>`).join('')}</table></div></div>` : '<div class="empty">Nothing stuck in the contract. 🎉</div>';
+    };
+    if (!first && poQ.chainData) { el.innerHTML = tabs + intro + table(poQ.chainData); return; }
+    el.innerHTML = `${tabs}${intro}<div class="empty chL">Scanning the contract… (takes a few seconds)</div>`;
+    const box = el.querySelector('.chL');
+    const d = await api(`/admin/pools/chain-orphans${poQ.chainFresh ? '?fresh=1' : ''}`);
+    poQ.chainFresh = false;
+    poQ.chainData = d;
+    if (!box || !box.isConnected || poQ.tab !== 'chain') return; // the admin moved on meanwhile
+    box.outerHTML = table(d);
     return;
   }
   if (poQ.tab === 'legacy') {
@@ -570,9 +581,11 @@ R.pools = async (el, first) => {
     </div>`).join('') + pager(d.page, d.pages, (n) => { poQ.page = n; load(false); }) : `<div class="empty">${poQ.filter ? 'Nothing needs attention. 🎉' : 'No pools yet.'}</div>`}`;
 };
 ACT.poT = (b) => { poQ.tab = b.dataset.k; load(true); };
+ACT.chScan = () => { poQ.chainData = null; poQ.chainFresh = true; load(true); };
 ACT.chRes = async (b) => {
   if (!await ask({ title: `Resolve pool #${b.dataset.p}?`, body: `This will <b>${esc(b.dataset.w)}</b>. Money only ever goes back to the people who paid it in, or to that pool's winners.`, ok: 'Resolve', danger: true })) return;
   const r = await act(b, () => api(`/admin/pools/chain-orphans/${b.dataset.p}/resolve`, { method: 'POST' }));
+  poQ.chainData = null; // rescan to show the new state
   if (r && r.result) toast(r.result.skipped ? `Not resolved: ${r.result.reason}` : `Done: ${r.result.action}${r.result.outcome && r.result.outcome.success ? ' ✓' : ' — failed: ' + ((r.result.outcome && r.result.outcome.error) || '')}`, !(r.result.outcome && r.result.outcome.success));
   load(false);
 };
@@ -616,7 +629,7 @@ ACT.pl2 = (r) => go('players', r.dataset.id);
 /* reports */
 let reQ = { status: 'open', type: '', page: 1 };
 R.reports = async (el) => {
-  await refreshCounts();
+  refreshCounts(); // badges update in the background - never hold the page
   const d = await api(`/admin/reports?page=${reQ.page}${reQ.status ? '&status=' + reQ.status : ''}${reQ.type ? '&type=' + reQ.type : ''}`);
   el.innerHTML = `<div class="row"><div class="chips">${[['open', `Open · ${d.openCount}`], ['resolved', 'Resolved'], ['', 'All']].map(([k, t]) => `<button class="chip ${reQ.status === k ? 'on' : ''}" data-act="reS" data-k="${k}">${t}</button>`).join('')}</div><div class="chips">${[['', 'Any type'], ['dispute', 'Disputes'], ['feedback', 'Feedback']].map(([k, t]) => `<button class="chip ${reQ.type === k ? 'on' : ''}" data-act="reT" data-k="${k}">${t}</button>`).join('')}</div></div>
     ${d.reports.length ? d.reports.map((r) => `<div class="item ${r.status === 'open' && r.type === 'dispute' ? 'warn' : ''}"><div class="row"><span class="tag ${r.type === 'dispute' ? 'red' : 'blue'}">${esc(r.type.toUpperCase())}</span><span class="t">${esc(r.subject)}</span><small>· ${esc(r.playerName || '')}${r.playerUsername ? ' @' + esc(r.playerUsername) : ''} · ${when(r.createdAt)}</small>${r.status === 'resolved' ? '<span class="tag ok">RESOLVED</span>' : ''}</div>
@@ -685,7 +698,7 @@ ACT.nwDel = async (b) => { if (!await ask({ title: 'Delete this post?', body: 'I
 /* custom avatars */
 let avPage = 1;
 R.avatars = async (el) => {
-  await refreshCounts();
+  refreshCounts(); // badges update in the background - never hold the page
   const [c, d] = await Promise.all([api('/admin/custom-avatar-request/config'), api('/admin/custom-avatar-request/list?page=' + avPage)]);
   el.innerHTML = `<div class="grid2"><div class="card"><h3>REQUESTS <span class="r">${num(d.total)}</span></h3>${d.requests.length ? d.requests.map((r) => `<div class="item ${r.status === 'submitted' ? 'warn' : ''}"><div class="row"><span class="tag ${r.status === 'submitted' ? 'pass' : 'ok'}">${esc((r.status || '').toUpperCase())}</span><span class="t">${esc(r.playerName || '—')}</span><small>· ${when(r.createdAt)}${r.pricePaidNear ? ' · paid ' + r.pricePaidNear : ''}${r.telegramUsername ? ' · tg @' + esc(r.telegramUsername) : ''}</small></div>
       <p>${esc(r.description || '')}</p><div class="acts" style="margin-top:8px"><button class="btn ghost" data-act="avImg" data-id="${r._id}">View image</button>${guard(`<button class="btn" data-act="avReply" data-id="${r._id}">${r.adminReply ? 'Reply again' : 'Reply'}</button><button class="btn red" data-act="avDel" data-id="${r._id}">Delete</button>`)}</div>${r.adminReply ? `<p class="muted" style="font-size:12px">Your reply: "${esc(r.adminReply)}"</p>` : ''}</div>`).join('') + pager(d.page, d.pages, (n) => { avPage = n; load(false); }) : '<div class="empty">No requests yet.</div>'}</div>
@@ -738,7 +751,7 @@ function logout(silent) {
 async function start() {
   $('#login').classList.add('hidden'); $('#app').classList.remove('hidden');
   const [, pg, pr] = (location.hash || '').split('/');
-  await refreshCounts();
+  refreshCounts(); // badges update in the background - never hold the page
   go(PAGES[pg] ? pg : 'overview', pr ? decodeURIComponent(pr) : null, false);
 }
 $('#lbtn').onclick = async () => {
