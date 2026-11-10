@@ -10190,6 +10190,7 @@ io.on("connection", (socket) => {
   });
 
   socket.on("setDevMode", ({ devMode }) => {
+    if (process.env.ALLOW_DEV_MODE !== "1") return; // live server: Dev Mode is off for everyone
     const roomCode = socket.data.roomCode;
     const room = rooms[roomCode];
     if (!room) return;
