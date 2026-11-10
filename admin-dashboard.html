@@ -137,6 +137,22 @@ tr.click{cursor:pointer}tr.click:hover td{background:rgba(255,255,255,.025)}tr.s
   .mnav button em{position:absolute;top:4px;right:calc(50% - 22px);font:600 9px var(--mono);font-style:normal;background:var(--r);color:#fff;border-radius:8px;padding:0 5px}
   .menu-btn{display:inline-flex !important}
 }
+/* weekly rewards */
+.wa-ph{display:flex;align-items:center;gap:12px;flex-wrap:wrap}.wa-ph .r{margin-left:auto}
+.wa-grid{display:grid;grid-template-columns:repeat(12,minmax(0,1fr));gap:14px}
+.wa-c4{grid-column:span 4}.wa-c5{grid-column:span 5}.wa-c7{grid-column:span 7}.wa-c12{grid-column:span 12}
+.wa-big{font:700 24px var(--disp)}.wa-big small{font:500 12px var(--mono);color:var(--dim)}
+.wa-note{font-size:12.5px;color:var(--dim);line-height:1.55;margin-top:8px}.wa-note b{color:#fff}
+.wa-in{display:flex;align-items:center;gap:8px;background:rgba(0,0,0,.35);border:1px solid rgba(255,255,255,.14);border-radius:8px;padding:6px 8px 6px 12px;font-weight:700}
+.wa-in input{background:none;border:none;color:#fff;font:700 18px var(--disp);width:80px;outline:none}.wa-in span{color:var(--dim);font:500 11px var(--mono);flex:1;white-space:nowrap}
+.wa-warn{border-left:3px solid var(--g);background:rgba(255,207,110,.07);padding:10px 12px;border-radius:0 8px 8px 0;font-size:12.5px;color:#e8dfc0;line-height:1.5}
+.wa-steps{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.wa-step{border:1px dashed rgba(110,255,192,.3);border-radius:8px;padding:10px 12px;font-size:12.5px;color:#c2ccc8;line-height:1.5}.wa-step b{display:block;color:#fff;margin-bottom:3px}
+.wa-step.done{border-style:solid;border-color:rgba(110,255,192,.45);background:rgba(110,255,192,.05)}.wa-step.done b{color:var(--m)}
+.wa-gold{border-color:rgba(255,207,110,.45);background:linear-gradient(135deg,rgba(255,207,110,.08),rgba(255,255,255,.02))}
+.wa-lbl{font:600 11px var(--mono);color:var(--dim);letter-spacing:.1em}.wa-cd{font:700 40px var(--mono);color:var(--g)}
+.wa-rk{display:grid;grid-template-columns:30px minmax(0,1fr) auto auto;gap:12px;align-items:center;padding:3px 0;font-size:13px}.wa-rk .p{font:700 12px var(--mono);color:var(--g)}.wa-no{color:#ffb84d}
+@media (max-width:900px){.wa-c4,.wa-c5,.wa-c7{grid-column:span 12}.wa-steps{grid-template-columns:1fr}}
 .menu-btn{display:none;font:600 18px var(--mono);padding:2px 8px;border:1px solid var(--line);border-radius:5px}
 </style>
 </head>
@@ -266,6 +282,8 @@ const PAGES = {
     help: `<b>How a sale works:</b> the player pays real NEAR on <b>mainnet</b> from their own wallet straight to <b>saboteur.near</b>, after signing a message proving the wallet is theirs. The server checks the transaction on-chain and switches Play Pass on. The server never holds that wallet's key.<ul><li><b>Refunds owed</b>: NEAR arrived but Play Pass couldn't be switched on (underpaid, already had it, or sales were off). Send the NEAR back yourself from saboteur.near, then press <b>Mark refunded</b> and paste the refund tx — the player gets an Inbox message.</li><li>Once Play Pass is active, sales are final.</li><li>Price changes apply to the next purchase immediately. A bigger discount also posts a News announcement.</li></ul>` },
   pools: { grp: 'MONEY', label: 'Pools & paid games', icon: '◈', title: 'POOLS & PAID GAMES', sub: 'Every on-chain pool, its money, and anything stuck', refresh: 20,
     help: `Testnet pools and paid games hold test NEAR in the pool contract until the last match, then pay the top 3 automatically. <b>Needs attention</b> = a payout failed, or a pool sat open/locked too long.<ul><li><b>Resolve now</b> retries the right action (pay out, or refund if no match finished).</li><li>A player can report a stuck payment; you can refund just them or mark it resolved.</li><li><b>Transactions</b> is the full money log: who paid whom, with explorer links.</li></ul>` },
+  weekly: { grp: 'MONEY', label: 'Weekly rewards', icon: '🏆', title: 'WEEKLY REWARDS', sub: 'Real NEAR for the weekly top 3 · paid by the Saboteur Agent on NEAR Intents', refresh: 15,
+    help: `<b>First time:</b> connect <b>saboteur.near</b> and sign twice (create the agent with its rules, then allow the game). Then add funds to the agent's deposit address. After that it runs itself: at every weekly reset the top 3 are queued as one batch, wait <b>30 minutes</b> (you can Send now or Cancel this week), then the agent sends them together. Change the prize any time; switch it off any time.<ul><li>The agent can only <b>withdraw NEAR</b>, up to a weekly $ cap and a per-payment cap that saboteur.near signed. The game server never holds saboteur.near's key.</li><li><b>Freeze</b> stops all payments; <b>Withdraw</b> sends everything back to saboteur.near.</li><li>Do the setup on the <b>live</b> admin (Render): that's where the game's permission is stored.</li></ul>` },
   wallets: { grp: 'MONEY', label: 'Wallets & revenue', icon: '◎', title: 'WALLETS & REVENUE', sub: 'Balances of every game wallet and what came in', refresh: 60,
     help: `<b>saboteur.near</b> is mainnet (real NEAR, Play Pass). Everything else here is <b>testnet</b> (test NEAR, no value): the pool contract holds pool money, the oracle pays gas and prizes, the owner wallet collects the 5% pool fee. Testnet totals and the mainnet Play Pass money are never added together.` },
   saboteur: { grp: 'MONEY', label: '$SABOTEUR', icon: '◆', title: '$SABOTEUR ECONOMY', sub: 'Testnet reward token: wallets, payouts, abuse flags', refresh: 60,
@@ -290,7 +308,7 @@ let current = 'overview', param = null, timer = null, lastLoad = 0;
 
 function renderSide() {
   const c = STATE.counts;
-  const badge = { overview: c.attention ? `<em>${c.attention}</em>` : '', live: c.live ? `<em class="ok">${c.live}</em>` : '', playpass: c.refunds ? `<em>${c.refunds}</em>` : '', pools: c.pools ? `<em class="g">${c.pools}</em>` : '', reports: c.reports ? `<em>${c.reports}</em>` : '', avatars: c.avatars ? `<em class="g">${c.avatars}</em>` : '' };
+  const badge = { overview: c.attention ? `<em>${c.attention}</em>` : '', live: c.live ? `<em class="ok">${c.live}</em>` : '', playpass: c.refunds ? `<em>${c.refunds}</em>` : '', pools: c.pools ? `<em class="g">${c.pools}</em>` : '', reports: c.reports ? `<em>${c.reports}</em>` : '', avatars: c.avatars ? `<em class="g">${c.avatars}</em>` : '', weekly: '<em class="g">NEW</em>' };
   let g = '', html = `<div class="brand"><i></i><div><b>SABOTEUR</b><small>ADMIN · ${esc(NET.toUpperCase())}</small></div></div>`;
   for (const [k, p] of Object.entries(PAGES)) {
     if (p.grp !== g) { g = p.grp; html += `<div class="grp">${g}</div>`; }
@@ -603,6 +621,219 @@ ACT.poRefund = async (b) => { if (!await ask({ title: 'Refund this one player?',
 ACT.poResolve = async (b) => { const v = await ask({ title: 'Mark resolved (no refund)?', input: { label: 'NOTE (OPTIONAL)', placeholder: 'Why no refund is needed' }, ok: 'Mark resolved' }); if (v === null) return; await act(b, () => api(`/admin/funds/${b.dataset.p}/resolve-stuck-report`, { json: { accountId: b.dataset.a, note: v } }), 'Resolved'); load(false); };
 
 /* wallets */
+/* ============ weekly rewards (NEAR Intents agent) ============ */
+// saboteur.near signs owner actions right here with its own wallet (HOT /
+// Meteor / Intear / Ledger via NEAR Connect, served from this server). The
+// server only prepares and submits them; it never sees the wallet's key.
+const WA = { conn: null, wallet: null, account: null, d: null };
+const mmss = (ms) => { const s = Math.max(0, Math.round(ms / 1000)); return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`; };
+setInterval(() => document.querySelectorAll('[data-cd]').forEach((e) => { e.textContent = mmss(new Date(e.dataset.cd) - Date.now()); }), 1000);
+const shortId = (s) => (s && s.length > 14 ? `${s.slice(0, 8)}…${s.slice(-4)}` : s || '—');
+const inTime = (d) => { const ms = new Date(d) - Date.now(); if (ms <= 0) return 'now'; const h = Math.floor(ms / 3600e3), dd = Math.floor(h / 24); return dd ? `in ${dd}d ${h % 24}h` : `in ${h}h ${Math.floor((ms % 3600e3) / 60e3)}m`; };
+async function waConnector() {
+  if (WA.conn) return WA.conn;
+  const { NearConnector } = await import('/vendor/near-connect-0.12.0.js');
+  WA.conn = new NearConnector({ network: 'mainnet', features: { signDelegateActions: true }, footerBranding: null });
+  WA.conn.on('wallet:signOut', () => { WA.wallet = null; WA.account = null; load(false); });
+  await WA.conn.whenManifestLoaded;
+  try { WA.wallet = await WA.conn.wallet(); const a = await WA.wallet.getAccounts(); WA.account = a && a[0] ? a[0] : null; } catch { WA.wallet = null; }
+  return WA.conn;
+}
+ACT.waConnect = async (b) => {
+  await act(b, async () => {
+    const c = await waConnector();
+    if (WA.wallet && WA.account && WA.account.accountId !== WA.d.owner) { await c.disconnect().catch(() => {}); WA.wallet = null; WA.account = null; }
+    if (!WA.wallet) { await c.connect(); WA.wallet = await c.wallet(); const a = await WA.wallet.getAccounts(); WA.account = a && a[0] ? a[0] : null; }
+    if (!WA.account || WA.account.accountId !== WA.d.owner) throw new Error(`Connected ${WA.account ? WA.account.accountId : 'nothing'}. Connect ${WA.d.owner} instead.`);
+  }, `${WA.d.owner} connected`);
+  load(false);
+};
+ACT.waDisconnect = async (b) => { await act(b, async () => { const c = await waConnector(); await c.disconnect(); WA.wallet = null; WA.account = null; }); load(false); };
+const waConnected = () => !!(WA.wallet && WA.account && WA.d && WA.account.accountId === WA.d.owner);
+const WA_WHAT = {
+  create: { t: 'Create the agent', b: 'saboteur.near becomes the owner of a new agent account on NEAR Intents and signs its rules once. Gasless.' },
+  grant: { t: 'Allow the game', b: 'Gives the game server permission to ask for payouts, valid for one year. It can only act inside the rules saboteur.near signed.' },
+  rules: { t: 'Change rules', b: 'Signs fresh payout rules that fit the current prize: withdraw NEAR only, a weekly $ cap and a per-payment cap.' },
+  withdraw_mode: { t: 'Withdraw to saboteur.near', b: 'Switches the agent to "send only to saboteur.near" and then sends everything there. Weekly payouts pause until you sign "Resume payouts".' },
+  freeze: { t: 'Freeze the agent', b: 'Stops every outgoing payment at NEAR Intents until you unfreeze it.' },
+  unfreeze: { t: 'Unfreeze the agent', b: 'Lets the agent pay again inside its rules.' },
+};
+async function waSign(kind, btn, extra = {}) {
+  if (!waConnected()) { toast(`Connect ${WA.d.owner} first (button at the top).`, true); return null; }
+  const w = WA_WHAT[kind];
+  const g = await act(btn, () => api('/admin/weekly-agent/intent', { json: { kind, publicKey: WA.account.publicKey || null, ...extra } }));
+  if (!g) return null;
+  const pol = g.policy ? `<div class="kv" style="margin-top:10px"><span>Can do</span><b>${esc((g.policy.actions || []).join(', '))}</b><span>Assets</span><b>${esc(Array.isArray(g.policy.assets) ? g.policy.assets.join(', ') : g.policy.assets)}</b><span>Weekly cap</span><b>${g.policy.budget && g.policy.budget.weekly_usd ? '$' + esc(g.policy.budget.weekly_usd) : 'none'}</b><span>Sends to</span><b>${esc(g.policy.destinations && g.policy.destinations.mode === 'only' ? g.policy.destinations.list.map((x) => x.address).join(', ') + ' only' : 'any winner wallet')}</b></div>` : '';
+  const depYocto = g.intent && g.intent.standard === 'nep366' ? (g.intent.payload.actions || []).reduce((a, x) => a + BigInt((x.params && x.params.deposit) || 0), 0n) : 0n;
+  const depTxt = depYocto > 0n ? `${esc(WA.account.accountId)} pays <b>${(Number(depYocto / 10n ** 18n) / 1e6).toFixed(4)} NEAR</b> storage deposit (gas is sponsored). ` : 'No NEAR is spent. ';
+  const okGo = await ask({ title: w.t + ' · sign', body: `${esc(w.b)}<div class="item" style="margin-top:10px"><p style="margin:0">${esc(g.summary)}</p></div>${pol}<p class="muted" style="font-size:12px;margin:10px 0 0">${depTxt}Your wallet (${esc(WA.account.accountId)}) opens next. Signing request expires ${esc(when(g.expiresAt).replace(' ago', ''))}.</p>`, ok: 'Sign with wallet' });
+  if (!okGo) return null;
+  const intent = g.intent;
+  let signedData;
+  try {
+    if (intent.standard === 'nep366') {
+      const r = await WA.wallet.signDelegateActions({ signerId: WA.d.owner, delegateActions: [intent.payload] });
+      const sd = r && r.signedDelegateActions && r.signedDelegateActions[0];
+      if (!sd) throw new Error('The wallet returned no signature.');
+      signedData = { standard: intent.standard, payload: intent.payload, signed_delegate: typeof sd === 'string' ? sd : sd.signedDelegate || sd };
+    } else if (intent.standard === 'nep413') {
+      const nonce = Uint8Array.from(atob(intent.payload.nonce), (c) => c.charCodeAt(0));
+      const r = await WA.wallet.signMessage({ message: intent.payload.message, recipient: intent.payload.recipient, nonce, signerId: WA.d.owner });
+      signedData = { standard: intent.standard, payload: intent.payload, public_key: r.publicKey, signature: r.signature };
+    } else throw new Error('This wallet type (' + intent.standard + ') is not supported here.');
+  } catch (e) { toast('Not signed: ' + (e.message || e), true); return null; }
+  toast('Signed. Waiting for NEAR Intents to confirm…');
+  const r = await act(null, () => api('/admin/weekly-agent/submit', { json: { correlationId: g.correlationId, signedData } }));
+  if (r) toast(r.status === 'SUCCESS' ? `${w.t}: done` : r.status === 'PROCESSING' ? `${w.t}: still confirming, this page updates by itself` : `${w.t}: ${r.status} ${r.failure || ''}`, !['SUCCESS', 'PROCESSING'].includes(r.status));
+  load(false);
+  return r;
+}
+ACT.waCreate = async (b) => {
+  const d = WA.d;
+  const ok = await ask({ title: 'Before you create the agent', body: `<p style="margin:0 0 10px">${esc(d.riskNotice)}</p><p style="margin:0 0 10px">Read and accept: <a href="${esc(d.ownerTermsUrl)}" target="_blank" rel="noopener">Owner Terms ↗</a> · <a href="${esc(d.outlayerTermsUrl)}" target="_blank" rel="noopener">OutLayer terms ↗</a></p><p class="muted" style="margin:0;font-size:12px">Clicking "I accept" records that ${esc(d.owner)} accepted them (time is saved).</p>`, ok: 'I accept' });
+  if (!ok) return;
+  await waSign('create', b, { termsAccepted: true });
+};
+ACT.waGrant = (b) => waSign('grant', b);
+ACT.waRules = (b) => waSign('rules', b);
+ACT.waFreeze = async (b) => { if (await ask({ title: 'Freeze the agent?', body: 'No payment can leave it until you unfreeze (one more signature). Unfreezing may have a short cooldown.', ok: 'Continue', danger: true })) waSign('freeze', b); };
+ACT.waUnfreeze = (b) => waSign('unfreeze', b);
+ACT.waWithdraw = async (b) => {
+  const d = WA.d;
+  if (d.mode === 'withdraw_to_owner') {
+    if (!await ask({ title: `Send everything to ${d.owner}?`, body: `About <b>${num(d.balanceNear, 4)} NEAR</b> goes to ${esc(d.owner)}.`, ok: 'Send' })) return;
+    await act(b, () => api('/admin/weekly-agent/withdraw-all', { method: 'POST' }), 'Withdrawal started'); load(false); return;
+  }
+  if (!await ask({ title: `Withdraw to ${d.owner}`, body: esc(WA_WHAT.withdraw_mode.b) + '<p class="muted" style="font-size:12px;margin:10px 0 0">Step 1: sign. Step 2: the server sends the full balance to ' + esc(d.owner) + ' automatically.</p>', ok: 'Continue' })) return;
+  const r = await waSign('withdraw_mode', b);
+  if (r && r.status === 'SUCCESS') { await act(null, () => api('/admin/weekly-agent/withdraw-all', { method: 'POST' }), 'Withdrawal started'); load(false); }
+};
+ACT.waFund = async (b) => {
+  const d = WA.d;
+  const dep = await act(b, () => api('/admin/weekly-agent/deposit', { method: 'POST' }));
+  if (!dep) return;
+  const canSend = waConnected();
+  const v = await ask({ title: 'Add funds to the agent', body: `<p style="margin:0 0 10px">${esc(d.riskNotice)}</p>
+    <div class="field"><label>DEPOSIT ADDRESS (NEAR MAINNET)</label><div class="item mono" style="word-break:break-all;margin:0">${esc(dep.address)}</div>${dep.memo ? `<div class="hint">Memo: <b>${esc(dep.memo)}</b> (required)</div>` : ''}</div>
+    <p class="muted" style="font-size:12px;margin:0 0 10px">Send NEAR to this address from any wallet${dep.minAmount ? ` (at least ${esc(num(Number(dep.minAmount) / 1e24, 4))} NEAR)` : ''}. It shows in the agent balance in a minute or two. Address valid until ${esc(full(dep.expiresAt))}. Try a small amount first.</p>
+    <button class="btn ghost" type="button" onclick="navigator.clipboard.writeText('${esc(dep.address)}')">Copy address</button>`,
+    ok: canSend ? `Send from ${d.owner}` : false, cancel: 'Close', input: canSend ? { label: 'OR SEND NOW FROM THE CONNECTED WALLET (NEAR)', placeholder: 'e.g. 3', value: '' } : undefined });
+  if (!v || !canSend) return;
+  const amt = Number(v);
+  if (!(amt > 0 && amt <= 1000)) { toast('Enter an amount in NEAR.', true); return; }
+  const yocto = (BigInt(Math.round(amt * 1e6)) * 10n ** 18n).toString();
+  await act(null, () => WA.wallet.signAndSendTransaction({ receiverId: dep.address, actions: [{ type: 'Transfer', params: { deposit: yocto } }] }), `Sent ${amt} NEAR. It shows in the balance in a minute or two.`);
+};
+ACT.waToggle = async (t) => {
+  const d = WA.d;
+  if (!d.enabled || d.stopAfterWeekEnd) { await act(null, () => api('/admin/weekly-agent/settings', { json: { enabled: true } }), 'Weekly rewards are ON'); load(false); return; }
+  const m = $('#modal'), box = $('#mbox');
+  box.innerHTML = `<h2>Switch weekly rewards off?</h2><div class="body">The prize banner disappears from Ranks right away. Remaining NEAR stays in the agent until you withdraw it.</div>
+    <div class="acts" style="flex-direction:column;align-items:stretch"><button class="btn gold" id="waOffA">Pay this week, then stop</button><button class="btn red" id="waOffB">Stop now${d.current && d.current.status === 'countdown' ? ' (also cancels the countdown)' : ''}</button><button class="btn ghost" id="waOffC">Keep it on</button></div>`;
+  m.classList.remove('hidden');
+  const close = () => { m.classList.add('hidden'); box.innerHTML = ''; };
+  const pick = async (offMode) => { close(); await act(null, () => api('/admin/weekly-agent/settings', { json: { enabled: false, offMode } }), offMode === 'now' ? 'Stopped' : 'Pays this week, then stops'); load(false); };
+  $('#waOffA').onclick = () => pick('after_this_week'); $('#waOffB').onclick = () => pick('now'); $('#waOffC').onclick = close;
+  m.onclick = (e) => { if (e.target === m) close(); };
+};
+ACT.waPrize = async (b) => {
+  const v = Number($('#waPrize').value);
+  if (!(v >= 1 && v <= 10000)) { toast('Prize must be between $1 and $10,000.', true); return; }
+  await act(b, () => api('/admin/weekly-agent/settings', { json: { prizeUsd: v } }), `Prize set to $${v}`);
+  load(false);
+};
+ACT.waSendNow = async (b) => { if (!await ask({ title: 'Send all 3 prizes now?', body: 'Skips the rest of the 30-minute timer. All winners with a wallet are paid together.', ok: 'Send now' })) return; await act(b, () => api(`/admin/weekly-agent/batch/${b.dataset.id}/send-now`, { method: 'POST' }), 'Sending…'); setTimeout(() => load(false), 2500); };
+ACT.waCancel = async (b) => { if (!await ask({ title: 'Cancel this week?', body: 'Nobody is paid for this week. Each winner gets a short Inbox note. This can\'t be undone.', ok: 'Cancel this week', danger: true, cancel: 'Keep it' })) return; await act(b, () => api(`/admin/weekly-agent/batch/${b.dataset.id}/cancel`, { method: 'POST' }), 'This week was cancelled'); load(false); };
+ACT.waRetry = async (b) => { await act(b, () => api(`/admin/weekly-agent/batch/${b.dataset.id}/retry`, { json: { rank: Number(b.dataset.r) } }), 'Retrying…'); setTimeout(() => load(false), 2500); };
+
+R.weekly = async (el) => {
+  const d = await api('/admin/weekly-agent');
+  WA.d = d;
+  if (!WA.conn) waConnector().then(() => { if (current === 'weekly' && WA.wallet) load(false); }).catch(() => {});
+  const F = isFull();
+  const price = d.nearPrice;
+  const totalNear = price ? d.prizeUsd / price : null;
+  const on = d.enabled && !d.stopAfterWeekEnd;
+  const wallet = waConnected()
+    ? `<span class="tag ok">✓ ${esc(WA.account.accountId)}</span>${F ? ` <button class="btn ghost" data-act="waDisconnect">Disconnect</button>` : ''}`
+    : (F ? `<button class="btn gold" data-act="waConnect">Connect ${esc(d.owner)}</button>` : '');
+  const head = `<div class="wa-ph"><div class="row">${wallet}</div><div class="r">${F && d.ready ? `<button class="toggle ${on ? 'on' : ''}" data-act="waToggle"><span class="sw"></span><b>${on ? 'ON' : d.stopAfterWeekEnd ? 'STOPS AFTER THIS WEEK' : 'OFF'}</b></button>` : ''}</div></div>`;
+  const warns = [];
+  if (!d.apiKeySet) warns.push('NEAR_INTENTS_AGENT_API_KEY is not set on this server. Add it in Render → Environment.');
+  if (d.agentError) warns.push('NEAR Intents: ' + d.agentError);
+  if (d.grantUnreadable) warns.push('The game\'s saved permission can\'t be read anymore (the server secret changed). Sign "Allow the game" again in the setup below.');
+  if (d.pending && d.pending.status === 'PROCESSING') warns.push(`Waiting for NEAR Intents to confirm "${(WA_WHAT[d.pending.kind] || {}).t || d.pending.kind}"…`);
+  if (d.pending && d.pending.error) warns.push(`Last signature (${(WA_WHAT[d.pending.kind] || {}).t || d.pending.kind}) failed: ${d.pending.error}`);
+  if (d.needsRulesUpdate) warns.push(`The agent's caps are too low for a $${d.prizeUsd} prize. Click "Change rules (sign)".`);
+  if (d.policy && d.policy.frozen) warns.push('The agent is FROZEN: no prize can be sent until you unfreeze it.');
+  if (d.mode === 'withdraw_to_owner') warns.push(`The agent is in withdraw-to-${d.owner} mode: weekly payouts are paused. Sign "Resume payouts" to start again.`);
+  if (d.ready && price && d.balanceNear != null && d.balanceNear < totalNear) warns.push(`The agent holds ${num(d.balanceNear, 3)} NEAR but this week's prize needs about ${num(totalNear, 3)} NEAR. Add funds.`);
+  const warnHtml = warns.map((w) => `<div class="wa-warn">${esc(w)}</div>`).join('');
+
+  // first-time setup
+  const step = (n, title, body, done, btn) => `<div class="wa-step ${done ? 'done' : ''}"><b>${done ? '✓' : n} · ${title}</b>${body}${!done && btn ? `<div style="margin-top:8px">${btn}</div>` : ''}</div>`;
+  const setup = !d.ready && d.mode !== 'withdraw_to_owner' ? `<div class="card wa-c12"><h3>FIRST-TIME SETUP</h3>
+    <div class="wa-steps">
+      ${step(1, 'Create the agent', `Sign once with ${esc(d.owner)} (HOT / Meteor / Intear). Gas is sponsored; ${esc(d.owner)} only pays a tiny storage deposit (about 0.015 NEAR). The rules are below.`, !!d.agentId, F ? `<button class="btn solid" data-act="waCreate" ${waConnected() ? '' : 'disabled'}>Sign · create agent</button>` : '')}
+      ${step(2, 'Allow the game', 'Sign once more: a permission (grant) for the game server to ask for payouts — only inside those rules.', d.hasGrant, F && d.agentId ? `<button class="btn solid" data-act="waGrant" ${waConnected() ? '' : 'disabled'}>Sign · allow the game</button>` : '')}
+      ${step(3, 'Fund it', "Send NEAR to the agent's deposit address from any wallet. 2–3 weeks of prizes is plenty.", d.balanceNear > 0, F && d.agentId ? `<button class="btn gold" data-act="waFund">＋ Get deposit address</button>` : '')}
+    </div>
+    ${waConnected() || !F ? '' : `<p class="muted" style="font-size:12px;margin:10px 0 0">Connect ${esc(d.owner)} first (button at the top).</p>`}
+    <div class="wa-warn" style="margin-top:12px">NEAR Intents Agent API is an experimental beta on mainnet. Keep only a few weeks of prizes in the agent; you can freeze it and withdraw the rest to ${esc(d.owner)} at any time.</div></div>` : '';
+
+  const prizeCard = `<div class="card wa-c4"><h3>THIS WEEK'S PRIZE</h3>
+    <div class="wa-in">$ <input id="waPrize" type="number" min="1" step="1" value="${esc(d.prizeUsd)}" ${F ? '' : 'disabled'}> <span>total · paid in NEAR</span>${F ? `<button class="btn" data-act="waPrize">Save</button>` : ''}</div>
+    <div class="wa-note">Split <b>${d.split.join(' / ')}</b> · ≈ ${num(totalNear, 2)} NEAR at $${num(price, 2)}<br>Changes apply from the next payout.</div></div>`;
+  const weeksLeft = price && d.balanceNear != null && d.prizeUsd ? Math.floor((d.balanceNear * price) / d.prizeUsd) : null;
+  const walletCard = `<div class="card wa-c4"><h3>AGENT WALLET</h3>
+    <div class="wa-big">${d.balanceNear == null ? '—' : num(d.balanceNear, 2) + ' NEAR'} <small>${d.balanceNear != null && price ? `≈ $${num(d.balanceNear * price, 1)} · ${weeksLeft} week${weeksLeft === 1 ? '' : 's'} left` : ''}</small></div>
+    ${d.ownerWithdraw ? `<div class="wa-note">Last withdraw: ${num(d.ownerWithdraw.amountNear, 3)} NEAR · ${esc(d.ownerWithdraw.status)}${d.ownerWithdraw.txHash ? ` · <a href="${explorer(d.ownerWithdraw.txHash, true)}" target="_blank" rel="noopener">tx ↗</a>` : ''}${d.ownerWithdraw.error ? ' · ' + esc(d.ownerWithdraw.error) : ''}</div>` : ''}
+    ${F && d.agentId ? `<div class="acts" style="margin-top:8px"><button class="btn gold" data-act="waFund">＋ Add funds</button>${d.hasGrant ? `<button class="btn" data-act="waWithdraw">Withdraw to ${esc(d.owner)}</button>` : ''}</div>` : ''}</div>`;
+  const nx = new Date(d.nextResetAt);
+  const nextCard = `<div class="card wa-c4"><h3>NEXT PAYOUT</h3>
+    <div class="wa-big">${esc(nx.toLocaleString(undefined, { weekday: 'short', hour: '2-digit', minute: '2-digit', hour12: false }))} <small>${esc(Intl.DateTimeFormat().resolvedOptions().timeZone)} · ${esc(inTime(nx))}</small></div>
+    <div class="wa-note">Queued at reset → sent 30 min later</div></div>`;
+
+  const leaders = `<div class="card wa-c7"><h3>WHO WOULD WIN RIGHT NOW</h3>${d.leadersNow.length ? `<div class="tbl"><table><tr><th>#</th><th>PLAYER</th><th>MAINNET WALLET</th><th style="text-align:right">PRIZE</th></tr>
+    ${d.leadersNow.map((w) => `<tr><td>${w.rank}</td><td><b>${esc(w.username || w.name)}</b> <small class="muted">${num(w.points)} pts</small></td><td>${w.wallet ? `<span class="mono">${esc(w.wallet)}</span>` : '<span class="tag pass">NO WALLET YET</span>'}</td><td class="mono" style="text-align:right">$${num(w.usd, 2)} · ${w.wallet ? num(w.near, 2) + ' N' : 'held 30 days'}</td></tr>`).join('')}</table></div>` : '<div class="empty">Nobody has points this week yet.</div>'}
+    <p class="wa-note" style="margin:8px 0 0">No mainnet wallet linked? The prize waits 30 days; the player gets an Inbox message to add one (Ranks → Prize wallet). After 30 days it stays in the agent.</p></div>`;
+
+  const p = d.policy;
+  const frozen = p && p.frozen;
+  const status = !d.agentId ? '<span class="tag dim">NOT CREATED</span>' : frozen ? '<span class="tag red">FROZEN</span>' : p && p.status !== 'APPLIED' ? `<span class="tag pass">${esc(p.status || 'APPLYING')}</span>` : d.mode === 'withdraw_to_owner' ? '<span class="tag pass">WITHDRAW MODE</span>' : '<span class="tag ok">ACTIVE</span>';
+  const canDo = p && p.actions ? (p.actions.length === 1 && p.actions[0] === 'withdraw' ? 'withdraw NEAR only — no swaps, no transfers' : p.actions.join(', ')) : 'withdraw NEAR only — no swaps, no transfers';
+  const rules = `<div class="card wa-c5"><h3>THE AGENT'S RULES (SIGNED BY ${esc(d.owner.toUpperCase())})</h3>
+    <div class="kv"><span>Owner</span><b>${esc(d.owner)}</b><span>Agent id</span><b class="mono">${esc(shortId(d.agentId))}</b>
+      <span>Can do</span><b>${esc(canDo)}</b>
+      <span>Sends to</span><b>${p && p.destinations === 'only' ? esc(d.owner) + ' only' : 'the winners\' wallets'}</b>
+      <span>Weekly cap</span><b>${p && p.capUsd != null ? `$${num(p.capUsd)} (covers the $${num(d.prizeUsd)} prize + margin)` : p ? 'none' : `$${Math.max(15, Math.ceil(d.prizeUsd * 1.5))} (covers the $${num(d.prizeUsd)} prize + margin)`}</b>
+      <span>One payment</span><b>${p && p.perTxNear != null ? `max ${num(p.perTxNear, 2)} NEAR` : p ? 'no cap' : 'max 3 NEAR'}</b>
+      <span>Timer</span><b>30 min before each weekly batch (cancel here)</b>
+      <span>Status</span><b>${status}</b></div>
+    ${F && d.agentId ? `<div class="acts" style="margin-top:10px">${d.mode === 'withdraw_to_owner' ? `<button class="btn solid" data-act="waRules">Resume payouts (sign)</button>` : `<button class="btn" data-act="waRules">Change rules (sign)</button>`}${frozen ? `<button class="btn" data-act="waUnfreeze">Unfreeze (sign)</button>` : `<button class="btn red" data-act="waFreeze">Freeze agent</button>`}</div>` : ''}</div>`;
+
+  const cur = d.current;
+  const wRow = (w) => `<div class="wa-rk"><span class="p">#${w.rank}</span><span><b>${esc(w.username || w.name)}</b></span><span class="mono ${w.wallet ? 'muted' : 'wa-no'}">${w.wallet ? esc(w.wallet) : 'no wallet · held 30 days'}</span><span class="mono">${num(w.amountNear, 2)} NEAR</span></div>`;
+  const batch = cur ? `<div class="card wa-c12 wa-gold"><h3 style="color:var(--g)">THIS WEEK'S PAYOUT · ${esc(cur.label.toUpperCase())} · ALL ${cur.winners.length} GO TOGETHER</h3>
+    <div class="row" style="gap:22px;align-items:center">
+      <div><div class="wa-lbl">${cur.status === 'countdown' ? 'SENDING IN' : 'SENDING'}</div><div class="wa-cd" ${cur.status === 'countdown' ? `data-cd="${esc(cur.sendAt)}"` : ''}>${cur.status === 'countdown' ? mmss(new Date(cur.sendAt) - Date.now()) : '…'}</div></div>
+      <div style="flex:1;min-width:280px">${cur.winners.map(wRow).join('')}</div>
+      ${F && cur.status === 'countdown' ? `<div class="acts" style="flex-direction:column"><button class="btn solid" data-act="waSendNow" data-id="${esc(cur.id)}">Send now</button><button class="btn red" data-act="waCancel" data-id="${esc(cur.id)}">Cancel this week</button></div>` : ''}
+    </div>
+    <p class="wa-note" style="margin:10px 0 0">At the weekly reset all three prizes are queued as <b>one batch</b> with one 30-minute timer. When it reaches 0:00 the agent sends them together. Cancel stops the whole batch (nobody is paid that week, everyone gets a short Inbox note).</p></div>` : '';
+
+  const tag = (b, w) => {
+    if (b.status === 'countdown' && (w.status === 'queued' || w.status === 'held')) return `<span class="tag pass">SENDING IN <span data-cd="${esc(b.sendAt)}">${mmss(new Date(b.sendAt) - Date.now())}</span></span>`;
+    const m = { paid: ['ok', 'PAID'], sending: ['blue', 'SENDING'], queued: ['blue', 'QUEUED'], held: ['pass', 'WAITING FOR WALLET'], failed: ['red', 'FAILED'], cancelled: ['dim', 'CANCELLED'], expired: ['dim', 'EXPIRED'] }[w.status] || ['dim', w.status.toUpperCase()];
+    return `<span class="tag ${m[0]}">${m[1]}</span>${w.status === 'held' && w.heldUntil ? ` <small class="muted">until ${esc(new Date(w.heldUntil).toLocaleDateString())}</small>` : ''}${w.error ? `<div class="muted" style="font-size:11px;margin-top:3px">${esc(w.error)}</div>` : ''}`;
+  };
+  const rows = d.history.flatMap((b) => b.winners.map((w) => `<tr><td>${esc(b.label)}</td><td><b>${esc(w.username || w.name)}</b> <small class="muted">#${w.rank}</small></td><td class="mono">${esc(w.wallet || '—')}</td><td class="mono" style="text-align:right">${num(w.amountNear, 3)} NEAR</td><td>${tag(b, w)}</td><td class="mono">${w.txHash ? `<a href="${explorer(w.txHash, true)}" target="_blank" rel="noopener">tx ${esc(w.txHash.slice(0, 4))}…${esc(w.txHash.slice(-2))} ↗</a>` : '—'}${F && w.status === 'failed' ? ` <button class="btn ghost" data-act="waRetry" data-id="${esc(b.id)}" data-r="${w.rank}">Retry</button>` : ''}</td></tr>`));
+  const payouts = `<div class="card wa-c12"><h3>PAYOUTS</h3>${rows.length ? `<div class="tbl"><table><tr><th>WEEK</th><th>PLAYER</th><th>WALLET</th><th style="text-align:right">AMOUNT</th><th>STATUS</th><th>PROOF</th></tr>${rows.join('')}</table></div>` : '<div class="empty">No weekly payouts yet.</div>'}</div>`;
+  const off = `<div class="card wa-c12"><h3>WHEN YOU SWITCH IT OFF</h3><p class="wa-note" style="margin:0">You choose: <b>"Pay this week, then stop"</b> or <b>"Stop now"</b>. The prize banner disappears from Ranks immediately; nobody is promised anything. Remaining NEAR stays in the agent until you withdraw it.</p></div>`;
+
+  el.innerHTML = `${head}${warnHtml}<div class="wa-grid">${setup}${prizeCard}${walletCard}${nextCard}${leaders}${rules}${batch}${payouts}${off}</div>`;
+};
+
 R.wallets = async (el) => {
   const [d, h] = await Promise.all([api('/admin/revenue'), api('/admin/revenue-wallet-history').catch(() => null)]);
   const w = (title, bal, acct, note, cls = '') => `<div class="card"><div class="muted mono" style="font-size:10px;letter-spacing:.12em">${title}</div><b style="display:block;font:700 22px var(--disp);margin:6px 0 2px;${cls}">${bal}</b><div class="mono" style="color:var(--m);font-size:11px;word-break:break-all">${esc(acct || 'not set')}</div>${note ? `<div class="muted" style="font-size:11.5px;margin-top:6px">${note}</div>` : ''}</div>`;

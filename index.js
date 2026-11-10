@@ -92,6 +92,7 @@ const bots = require("./bots/botManager");
 // [$SABOTEUR] testnet token economy - rules in economy/rules.js
 const economy = require("./economy/match");
 const saboteurToken = require("./economy/saboteurToken");
+const weeklyAgent = require("./economy/weeklyAgent");
 bots.init({ io, rooms });
 
 // ============================================================
@@ -6843,6 +6844,68 @@ app.post("/admin/leaderboard/reset", requireAdmin, requireFullAdmin, async (req,
   }
 });
 
+// ---- WEEKLY REWARDS AGENT (NEAR Intents) ----
+// See economy/weeklyAgent.js. saboteur.near signs owner actions in the admin
+// browser; the server only ever holds the partner API key and the grant token.
+const wa = (fn) => async (req, res) => {
+  try { res.json(await fn(req)); }
+  catch (e) {
+    console.error("[WEEKLY AGENT] admin:", e.code || "", e.message);
+    res.status(e.status && e.status < 500 ? 400 : 500).json({ message: e.message || "Something went wrong.", code: e.code || null });
+  }
+};
+app.get("/admin/weekly-agent", requireAdmin, wa(() => weeklyAgent.adminView()));
+app.post("/admin/weekly-agent/settings", requireAdmin, requireFullAdmin, wa(async (req) => {
+  const b = req.body || {};
+  await weeklyAgent.saveSettings({ enabled: typeof b.enabled === "boolean" ? b.enabled : undefined, prizeUsd: b.prizeUsd, offMode: b.offMode });
+  logAdminAction("weekly-agent-settings", { enabled: b.enabled, prizeUsd: b.prizeUsd, offMode: b.offMode || null });
+  return weeklyAgent.adminView();
+}));
+app.post("/admin/weekly-agent/intent", requireAdmin, requireFullAdmin, wa((req) => {
+  const b = req.body || {};
+  return weeklyAgent.generateOwnerIntent(String(b.kind || ""), { publicKey: b.publicKey, termsAccepted: b.termsAccepted === true, adminName: req.adminUsername || "admin" });
+}));
+app.post("/admin/weekly-agent/submit", requireAdmin, requireFullAdmin, wa((req) => {
+  const b = req.body || {};
+  return weeklyAgent.submitOwnerIntent(String(b.correlationId || ""), b.signedData);
+}));
+app.post("/admin/weekly-agent/deposit", requireAdmin, requireFullAdmin, wa(() => weeklyAgent.depositAddress()));
+app.post("/admin/weekly-agent/withdraw-all", requireAdmin, requireFullAdmin, wa(async () => {
+  const r = await weeklyAgent.withdrawAllToOwner();
+  logAdminAction("weekly-agent-withdraw-all", { status: r.status });
+  return r;
+}));
+app.post("/admin/weekly-agent/batch/:id/send-now", requireAdmin, requireFullAdmin, wa(async (req) => {
+  await weeklyAgent.sendNow(req.params.id);
+  logAdminAction("weekly-agent-send-now", { batchId: req.params.id });
+  return { ok: true };
+}));
+app.post("/admin/weekly-agent/batch/:id/cancel", requireAdmin, requireFullAdmin, wa(async (req) => {
+  await weeklyAgent.cancelBatch(req.params.id);
+  logAdminAction("weekly-agent-cancel-week", { batchId: req.params.id });
+  return { ok: true };
+}));
+app.post("/admin/weekly-agent/batch/:id/retry", requireAdmin, requireFullAdmin, wa(async (req) => {
+  await weeklyAgent.retryWinner(req.params.id, (req.body || {}).rank);
+  logAdminAction("weekly-agent-retry", { batchId: req.params.id, rank: (req.body || {}).rank });
+  return { ok: true };
+}));
+// Public: the Ranks page prize banner (+ the signed-in player's prize wallet).
+app.get("/weekly-rewards", async (req, res) => {
+  try {
+    const token = String(req.query.sessionToken || "").trim();
+    let me = null;
+    if (token) {
+      const p = await Player.findOne({ sessionToken: token }, "payoutWallet verifiedWalletAddress sessionTokenExpiresAt").lean();
+      if (p && p.sessionTokenExpiresAt && new Date(p.sessionTokenExpiresAt).getTime() > Date.now()) me = p;
+    }
+    res.json(await weeklyAgent.publicView(me));
+  } catch (e) {
+    console.error("[WEEKLY AGENT] /weekly-rewards:", e.message);
+    res.json({ active: false });
+  }
+});
+
 // ---- ROOMS (grouped match-activity view) ----
 // One entry per permanent room session (see roomSessionId), not one
 // per match - click into a room to see every match/player inside it.
@@ -13210,6 +13273,11 @@ setInterval(() => {
 setTimeout(() => { reconcileOrphanedPools(); reconcileManualPools(); }, 30 * 1000);
 const RECONCILE_INTERVAL_MS = 3 * 60 * 1000;
 setInterval(() => { reconcileOrphanedPools(); reconcileManualPools(); }, RECONCILE_INTERVAL_MS);
+
+weeklyAgent.init({
+  Player, MatchRecord, Announcement, sendInboxMessage, cleanPayoutWallet, getCurrentWeekStartUTC, logAdminAction,
+  leaderboardResetAt: async () => { const d = await LeaderboardReset.findOne({ type: "weekly" }).lean(); return d ? d.resetAt : null; },
+});
 
 const PORT = process.env.PORT || 3000;
 

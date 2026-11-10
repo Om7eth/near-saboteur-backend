@@ -65,6 +65,34 @@ Prizes go out automatically 15 seconds after the last match. Nobody has to confi
 
 The lobby **Standings** board shows each player's line for every match: role, won or lost, missions or kills, and points. Tap a player to see it.
 
+## Weekly Rewards Agent (NEAR Intents)
+
+Every week the top 3 on the weekly Ranks get **real NEAR on mainnet**. An agent account on NEAR Intents pays them, through the [NEAR Intents Agent API](https://partners.demo.agentsonintents.com/). The code is in `economy/weeklyAgent.js`, and the admin page is Admin → Weekly rewards.
+
+- **The owner is `saboteur.near`.** It signs the agent's rules once in the admin page, with its own wallet through NEAR Connect. The game server never holds its key.
+- **The rules (policy):**
+  - Withdraw only, and only wNEAR (no swaps, no transfers).
+  - A weekly USD cap of 1.5× the prize.
+  - A per-payment cap.
+  - Rules are enforced by the API, not by our code.
+- **The game server** holds only the partner API key (env) and a grant token, which is encrypted in MongoDB.
+- **At the weekly reset (Saturday 00:00 IST)** the top 3 are queued as one batch with one **30-minute timer**. The admin can *Send now* or *Cancel this week*. When the timer ends, all three are paid together.
+  - The split is 50/30/20.
+  - The USD prize is converted at the live NEAR price.
+  - Ties go to whoever reached the score first.
+  - Held or banned accounts are skipped.
+- **No double payments:** every payment's `Idempotency-Key` is saved before it is sent. A lost response is retried with the same key.
+- **No wallet yet?** The prize waits 30 days and is paid automatically once the player adds a prize wallet (Ranks → prize wallet).
+- **Notifications:**
+  - Winners get Inbox messages when they are queued and again when the prize is paid (with the tx).
+  - A News post goes out when the week is paid.
+- **Switching it off:** choose "Pay this week, then stop" or "Stop now". *Freeze* and *Withdraw to saboteur.near* are owner-signed.
+
+Env: `NEAR_INTENTS_AGENT_API_KEY` (required). Optional:
+- `NEAR_INTENTS_AGENT_API_URL` (default `https://api.demo.agentsonintents.com`)
+- `WEEKLY_AGENT_OWNER` (default `saboteur.near`)
+- `WEEKLY_AGENT_SECRET` (encrypts the grant token; defaults to a key derived from `MONGODB_URI`)
+
 ## Testnet wallet gift
 
 These rules apply on **testnet only** (`NEAR_NETWORK=testnet`). None of them run on mainnet.
