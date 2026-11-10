@@ -7322,7 +7322,8 @@ app.get("/admin", (req, res) => {
 // (never awaited on the critical path), so a slow Telegram API
 // response can never delay a socket event response to a player.
 // ============================================================
-const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "";
+// [PAUSED] Telegram is off until TELEGRAM_PAUSED=0 is set on Render.
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_PAUSED === "0" ? (process.env.TELEGRAM_BOT_TOKEN || "") : "";
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || "@nearsaboteur";
 const TELEGRAM_TOPIC_ID = process.env.TELEGRAM_TOPIC_ID
   ? Number(process.env.TELEGRAM_TOPIC_ID)
