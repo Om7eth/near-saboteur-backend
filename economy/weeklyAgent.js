@@ -53,6 +53,7 @@ const stateSchema = new mongoose.Schema({
   mode: { type: String, enum: ["payout", "withdraw_to_owner"], default: "payout" },
   termsAcceptedAt: { type: Date, default: null },
   termsAcceptedBy: { type: String, default: null },
+  onAnnouncedAt: { type: Date, default: null }, // last "weekly prizes are ON" News post
   // The owner action waiting for (or just given) saboteur.near's signature.
   pending: {
     correlationId: String,
@@ -698,6 +699,19 @@ async function publicView(me) {
 }
 
 // ---------------- admin actions ----------------
+async function announceOn(s) {
+  const usd = prizesFor(s.prizeUsd, splitOf(s));
+  const price = await nearPrice().catch(() => null);
+  const n = (u) => (price ? ` (≈ ${(u / price).toFixed(2)} NEAR)` : "");
+  const reset = new Date(D.getCurrentWeekStartUTC().getTime() + WEEK_MS);
+  const when = reset.toLocaleString("en-US", { weekday: "long", hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Kolkata" });
+  await D.Announcement.create({
+    title: `Weekly prizes are ON · $${fmtUsd(s.prizeUsd)} in NEAR every week`,
+    body: `The top 3 on the weekly Ranks win real NEAR: 🥇 #1 $${fmtUsd(usd[0])}${n(usd[0])} · 🥈 #2 $${fmtUsd(usd[1])}${n(usd[1])} · 🥉 #3 $${fmtUsd(usd[2])}${n(usd[2])}.\nThis week's winners are decided at the weekly reset (${when} IST) and paid automatically 30 minutes later by the Saboteur Agent on NEAR Intents.\nAdd your mainnet NEAR wallet on Ranks so your prize can reach you. Optional and may change or stop at any time.`,
+    nameTag: "NEAR Saboteur",
+  });
+  s.onAnnouncedAt = new Date();
+}
 async function saveSettings({ enabled, prizeUsd, offMode }) {
   const s = await getState();
   if (prizeUsd !== undefined) {
@@ -707,9 +721,15 @@ async function saveSettings({ enabled, prizeUsd, offMode }) {
   }
   if (enabled === true) {
     if (!s.enabled || s.stopAfterWeekEnd) {
+      const wasFullyOff = !s.enabled;
       s.enabled = true;
       s.stopAfterWeekEnd = null;
       if (!s.enabledAt) s.enabledAt = new Date();
+      // Switching ON tells every player in News (at most once per 12h, so
+      // flipping the switch back and forth never spams the News tab).
+      if (wasFullyOff && ready(s) && !(s.onAnnouncedAt && Date.now() - s.onAnnouncedAt.getTime() < 12 * 3600 * 1000)) {
+        await announceOn(s).catch((e) => console.error("[WEEKLY AGENT] ON announcement failed:", e.message));
+      }
     }
   } else if (enabled === false) {
     if (offMode === "after_this_week") {
