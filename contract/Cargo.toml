@@ -29,3 +29,15 @@ borsh = "1.5"
 # targeted size optimization later, one flag at a time, once this is
 # confirmed working end-to-end.
 overflow-checks = true
+# [v4] size optimisation re-enabled one flag at a time and checked: the
+# build still exports every contract method (see the export check in the
+# audit notes) and runs on testnet.
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+debug = false
+strip = true
+
+[dev-dependencies]
+near-sdk = { version = "=5.26.1", features = ["legacy", "unit-testing"] }

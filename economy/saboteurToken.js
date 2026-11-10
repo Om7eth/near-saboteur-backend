@@ -1,0 +1,179 @@
+// ============================================================
+// $SABOTEUR on NEAR testnet - the only file that talks to the chain.
+//
+// Accounts (all sub-accounts of SABOTEUR_PARENT_ACCOUNT_ID, all controlled
+// by the one server key, so players never sign anything):
+//   token.<parent>         NEP-141 contract (scripts/setup-saboteur-token.mjs)
+//   treasury.<parent>      holds the supply - COLD key, offline, the server can't touch it
+//   rewards.<parent>       small hot wallet the server pays every reward from
+//   bots.<parent>          Bot Treasury - bot earnings above the per-bot cap (cold key)
+//   bot-<name>.<parent>    one per AI bot persona
+//   p-<accountId>.<parent> made automatically the first time a player earns
+//
+// Everything goes through ONE queue: several rooms can finish at the same
+// time and the server key's nonce never collides. Payouts never block the
+// game - if the chain is slow or the treasury is empty, the game carries
+// on and the ledger keeps the row as "failed" to retry later.
+// ============================================================
+
+const PARENT = process.env.SABOTEUR_PARENT_ACCOUNT_ID || "";
+const KEY = process.env.SABOTEUR_PARENT_PRIVATE_KEY || "";
+const RPC_URL = process.env.SABOTEUR_RPC_URL || "https://test.rpc.fastnear.com";
+const DECIMALS = 18n;
+const TOKEN = PARENT ? `token.${PARENT}` : "";
+const TREASURY = PARENT ? `treasury.${PARENT}` : "";
+const REWARDS = PARENT ? `rewards.${PARENT}` : "";
+const BOT_TREASURY = PARENT ? `bots.${PARENT}` : "";
+const EXPLORER = "https://testnet.nearblocks.io";
+
+let nearPromise = null;
+const loadNear = () => (nearPromise ||= import("near-api-js"));
+let ctx = null; // { near, provider, parent, treasury, publicKey }
+async function chain() {
+  if (ctx) return ctx;
+  const near = await loadNear();
+  const provider = new near.JsonRpcProvider({ url: RPC_URL });
+  ctx = {
+    near, provider,
+    parent: new near.Account(PARENT, provider, KEY),
+    rewards: new near.Account(REWARDS, provider, KEY), // the only wallet the server pays from
+    publicKey: near.KeyPair.fromString(KEY).getPublicKey().toString(),
+  };
+  return ctx;
+}
+
+function configured() { return !!(PARENT && KEY); }
+const walletForBot = (name) => `bot-${String(name).toLowerCase().replace(/[^a-z0-9]/g, "")}.${PARENT}`;
+const walletForPlayer = (accountId) => `p-${String(accountId).toLowerCase().replace(/[^a-z0-9]/g, "")}.${PARENT}`;
+const explorerAccount = (id) => `${EXPLORER}/address/${id}`;
+const explorerTx = (hash) => `${EXPLORER}/txns/${hash}`;
+
+// whole tokens (2 decimals of precision) <-> on-chain units
+function toUnits(amount) {
+  const cents = BigInt(Math.round(Number(amount) * 100));
+  return (cents * 10n ** (DECIMALS - 2n)).toString();
+}
+function fromUnits(units) {
+  const v = BigInt(units || "0");
+  return Number(v / 10n ** (DECIMALS - 2n)) / 100;
+}
+
+// ---- one queue for every write ----
+let tail = Promise.resolve();
+function enqueue(job) {
+  const run = tail.then(job, job);
+  tail = run.catch(() => {});
+  return run;
+}
+
+const known = new Set(); // wallets we know exist AND are registered on the token
+async function accountExists(id) {
+  const { provider } = await chain();
+  try { await provider.viewAccount({ accountId: id }); return true; } catch { return false; }
+}
+async function view(method, args) {
+  const { provider } = await chain();
+  return provider.callFunction({ contractId: TOKEN, method, args });
+}
+
+// Make sure a wallet exists and can hold $SABOTEUR. Parent pays (testnet).
+async function ensureWallet(id) {
+  if (known.has(id) || id === BOT_TREASURY) return; // Bot Treasury is set up once by the secure script
+  const { near, parent, publicKey } = await chain();
+  if (!(await accountExists(id))) {
+    const prefix = id.slice(0, -(PARENT.length + 1));
+    await parent.createSubAccount({ accountOrPrefix: prefix, publicKey, nearToTransfer: near.nearToYocto("0.01") });
+  }
+  const reg = await view("storage_balance_of", { account_id: id });
+  if (!reg) {
+    const bounds = await view("storage_balance_bounds", {});
+    await parent.callFunction({
+      contractId: TOKEN, methodName: "storage_deposit",
+      args: { account_id: id, registration_only: true }, deposit: BigInt(bounds.min), gas: near.teraToGas("10"),
+    });
+  }
+  known.add(id);
+}
+
+// payouts: [{ wallet, amount }] (whole tokens). One transaction from the
+// rewards wallet with one ft_transfer per receiver (all-or-nothing: if one
+// transfer fails, none happen). Resolves { ok, txHash, error }.
+//
+// [NO DOUBLE PAY] A timeout does NOT mean the transaction failed - it may
+// still land. So the transaction is signed first and handed to onSigned()
+// to be saved, then sent. On a retry (opts.prior) we first ask the chain
+// what happened to that exact transaction:
+//   succeeded        -> done, never send again
+//   failed on-chain  -> nothing moved (atomic) -> safe to build a new one
+//   not found        -> re-send the SAME signed bytes (same nonce, so it can
+//                       land at most once); only if it can no longer land
+//                       (expired / nonce already used by something else)
+//                       is a new transaction built.
+async function txOutcome(txHash) {
+  const { provider } = await chain();
+  try {
+    const r = await provider.viewTransactionStatus({ txHash, accountId: REWARDS, waitUntil: "EXECUTED_OPTIMISTIC" });
+    if (r && r.status && r.status.Failure) return "failed";
+    if (r && r.status && ("SuccessValue" in r.status || "SuccessReceiptId" in r.status)) return "success";
+    return "unknown";
+  } catch (e) {
+    return "unknown";
+  }
+}
+function failureText(f) {
+  try { return JSON.stringify(f).slice(0, 300); } catch { return "transaction failed"; }
+}
+function payMatch(payouts, memo, opts = {}) {
+  const list = (payouts || []).filter((p) => p.wallet && Number(p.amount) > 0);
+  if (!configured() || !list.length) return Promise.resolve({ ok: false, error: configured() ? "nothing to pay" : "not configured" });
+  return enqueue(async () => {
+    const { near, rewards, provider } = await chain();
+    try {
+      const prior = opts.prior;
+      if (prior && prior.txHash) {
+        const st = await txOutcome(prior.txHash);
+        if (st === "success") return { ok: true, txHash: prior.txHash };
+        if (st === "unknown" && prior.signedTx) {
+          try {
+            const signed = near.SignedTransaction.decode(Buffer.from(prior.signedTx, "base64"));
+            const res = await provider.sendTransactionUntil(signed, "EXECUTED_OPTIMISTIC");
+            if (res && res.status && res.status.Failure) return { ok: false, error: failureText(res.status.Failure) };
+            return { ok: true, txHash: prior.txHash };
+          } catch (e) {
+            const msg = String(e.message || e);
+            if (!/expired|nonce/i.test(msg)) return { ok: false, error: msg.slice(0, 300) }; // still might land - keep waiting
+            // can it have landed after all? (nonce used by this very tx)
+            if ((await txOutcome(prior.txHash)) === "success") return { ok: true, txHash: prior.txHash };
+            // expired or nonce taken by another tx -> this one can never land: build a new one below
+          }
+        }
+        // "failed" -> nothing moved; build a new one below
+      }
+      for (const p of list) await ensureWallet(p.wallet);
+      const actions = list.map((p) => near.actions.functionCall(
+        "ft_transfer", { receiver_id: p.wallet, amount: toUnits(p.amount), memo: memo || null }, near.teraToGas("12"), 1n,
+      ));
+      const publicKey = await rewards.signer.getPublicKey();
+      const tx = await rewards.createTransaction({ receiverId: TOKEN, actions, publicKey });
+      const { txHash: hashBytes, signedTransaction } = await rewards.signer.signTransaction(tx);
+      const txHash = near.baseEncode(hashBytes);
+      if (opts.onSigned) await opts.onSigned(txHash, Buffer.from(signedTransaction.encode()).toString("base64"));
+      const res = await provider.sendTransactionUntil(signedTransaction, "EXECUTED_OPTIMISTIC");
+      if (res && res.status && res.status.Failure) return { ok: false, error: failureText(res.status.Failure) };
+      return { ok: true, txHash };
+    } catch (e) {
+      console.warn("[SABOTEUR] payout failed:", e.message);
+      return { ok: false, error: String(e.message || e).slice(0, 300) };
+    }
+  });
+}
+
+async function balanceOf(wallet) {
+  if (!configured()) return null;
+  try { return fromUnits(await view("ft_balance_of", { account_id: wallet })); } catch { return null; }
+}
+
+module.exports = {
+  configured, walletForBot, walletForPlayer, payMatch, balanceOf, ensureWallet,
+  explorerAccount, explorerTx, TOKEN, TREASURY, REWARDS, BOT_TREASURY, PARENT,
+};

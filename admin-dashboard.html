@@ -1,0 +1,1007 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex, nofollow">
+<title>NEAR Saboteur · Admin</title>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{--m:#6effc0;--g:#ffcf6e;--r:#ff6b7a;--b:#6ec8ff;--ink:#e6ece9;--dim:#7d8d86;--line:rgba(255,255,255,.08);--bg:#070a09;--mono:'IBM Plex Mono',monospace;--disp:'Space Grotesk',sans-serif;--sans:'IBM Plex Sans',system-ui,sans-serif}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);font-family:var(--sans)}
+button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
+input,textarea,select{font:inherit;color:inherit}
+a{color:var(--m)}
+.hidden{display:none !important}
+/* login */
+#login{min-height:100%;display:flex;align-items:center;justify-content:center;padding:20px}
+.lbox{width:100%;max-width:380px;border:1px solid var(--line);background:rgba(255,255,255,.02);border-radius:10px;padding:26px 24px}
+.lbox h1{margin:0 0 4px;font:700 22px var(--disp);letter-spacing:.12em}
+.lbox p{margin:0 0 18px;color:var(--dim);font-size:13px}
+/* shell */
+#app{height:100%;display:grid;grid-template-columns:236px 1fr}
+.side{border-right:1px solid var(--line);padding:16px 12px;display:flex;flex-direction:column;gap:2px;background:#050807;overflow:auto}
+.brand{display:flex;align-items:center;gap:10px;margin:0 6px 14px}
+.brand i{width:30px;height:30px;background:radial-gradient(circle at 35% 30%,#9dffd6,#1d6b4f);clip-path:polygon(25% 0,75% 0,100% 50%,75% 100%,25% 100%,0 50%);flex-shrink:0}
+.brand b{font:700 15px var(--disp);letter-spacing:.14em}.brand small{display:block;font:10px var(--mono);color:var(--dim);letter-spacing:.14em}
+.grp{font:600 9.5px var(--mono);letter-spacing:.18em;color:#4b5a54;margin:14px 10px 5px}
+.nav{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:6px;font:500 13.5px var(--sans);color:#9fb0a8;text-align:left;width:100%}
+.nav:hover{background:rgba(255,255,255,.03);color:#d6e0db}
+.nav.on{background:rgba(110,255,192,.1);color:#fff;box-shadow:inset 2px 0 0 var(--m)}
+.nav em{margin-left:auto;font:600 10px var(--mono);font-style:normal;padding:1px 7px;border-radius:9px;background:rgba(255,107,122,.18);color:var(--r)}
+.nav em.g{background:rgba(255,207,110,.15);color:var(--g)}.nav em.ok{background:rgba(110,255,192,.14);color:var(--m)}
+.foot{margin-top:auto;padding:12px 10px 4px;border-top:1px solid var(--line);font:11px var(--mono);color:var(--dim);line-height:1.7}
+.foot b{color:var(--m);font-weight:600}
+.main{display:flex;flex-direction:column;min-width:0;min-height:0}
+.top{min-height:62px;flex-shrink:0;display:flex;align-items:center;gap:12px;padding:10px 24px;border-bottom:1px solid var(--line);flex-wrap:wrap}
+.top h1{margin:0;font:700 19px var(--disp);letter-spacing:.08em}
+.top .sub{font:11.5px var(--mono);color:var(--dim)}
+.top .r{margin-left:auto;display:flex;align-items:center;gap:8px}
+.pill{font:600 11px var(--mono);padding:5px 9px;border-radius:5px;border:1px solid var(--line);color:#b8c4bf;white-space:nowrap}
+.pill.live{border-color:rgba(110,255,192,.4);color:var(--m)}.pill.main{border-color:rgba(255,207,110,.5);color:var(--g)}
+.upd{font:10.5px var(--mono);color:#4b5a54}
+.helpbtn{font:600 11px var(--mono);padding:5px 9px;border-radius:5px;border:1px solid rgba(110,200,255,.35);color:var(--b)}
+.help{margin:14px 24px 0;padding:12px 14px;border:1px solid rgba(110,200,255,.25);background:rgba(110,200,255,.05);border-radius:8px;font-size:13px;line-height:1.6;color:#c8d6de}
+.help b{color:#fff}.help ul{margin:6px 0 0;padding-left:18px}
+#content{flex:1;overflow:auto;padding:18px 24px 40px;display:flex;flex-direction:column;gap:16px}
+/* bits */
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px}
+.kpi{padding:14px 16px;border:1px solid var(--line);background:rgba(255,255,255,.02);border-radius:8px;text-align:left}
+.kpi span{font:600 10px var(--mono);letter-spacing:.14em;color:var(--dim)}.kpi b{display:block;font:700 26px var(--disp);margin:6px 0 2px}.kpi small{font:11.5px var(--mono);color:var(--dim)}
+button.kpi:hover{border-color:rgba(255,255,255,.18)}
+.grid2{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(0,1fr);gap:16px}
+.grid2.even{grid-template-columns:1fr 1fr}
+.card{border:1px solid var(--line);background:rgba(255,255,255,.02);border-radius:8px;padding:16px 18px;min-width:0}
+.card h3{margin:0 0 12px;font:700 13px var(--disp);letter-spacing:.14em;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.card h3 .r{margin-left:auto;font:500 11px var(--mono);color:var(--dim);letter-spacing:0}
+.card p.d{margin:0 0 12px;font-size:12.5px;color:var(--dim);line-height:1.55}
+.att{display:flex;align-items:center;gap:12px;padding:10px 12px;border:1px solid var(--line);border-radius:6px;margin-bottom:8px;background:rgba(0,0,0,.2);width:100%;text-align:left}
+.att:hover{border-color:rgba(255,255,255,.18)}
+.att i{width:8px;height:8px;border-radius:50%;flex-shrink:0}.att.red i{background:var(--r);box-shadow:0 0 8px var(--r)}.att.gold i{background:var(--g)}.att.blue i{background:var(--b)}
+.att .t{flex:1;min-width:0}.att .t b{display:block;font:600 13.5px var(--sans)}.att .t span{font:11.5px var(--mono);color:var(--dim)}
+.btn{display:inline-flex;align-items:center;gap:6px;font:600 11.5px var(--mono);padding:7px 12px;border-radius:5px;border:1px solid rgba(110,255,192,.4);color:var(--m);background:rgba(110,255,192,.06);white-space:nowrap}
+.btn:hover{background:rgba(110,255,192,.12)}.btn:disabled{opacity:.45;cursor:not-allowed}
+.btn.gold{border-color:rgba(255,207,110,.45);color:var(--g);background:rgba(255,207,110,.06)}
+.btn.red{border-color:rgba(255,107,122,.5);color:var(--r);background:rgba(255,107,122,.06)}
+.btn.ghost{border-color:var(--line);color:#b8c4bf;background:transparent}
+.btn.solid{background:var(--m);color:#04120b;border-color:var(--m)}
+.acts{display:flex;flex-wrap:wrap;gap:6px}
+.chips{display:flex;gap:6px;flex-wrap:wrap}
+.chip{font:600 11px var(--mono);padding:6px 10px;border:1px solid var(--line);border-radius:5px;color:#9fb0a8}
+.chip.on{border-color:rgba(110,255,192,.5);color:var(--m);background:rgba(110,255,192,.07)}
+.chip.on.red{border-color:rgba(255,107,122,.5);color:var(--r);background:rgba(255,107,122,.07)}
+.field{margin-bottom:12px}.field label{display:block;font:600 10px var(--mono);letter-spacing:.14em;color:var(--dim);margin-bottom:6px}
+.field .hint{font-size:11.5px;color:#5d6d66;margin-top:5px;line-height:1.45}
+.in{width:100%;padding:10px 12px;border:1px solid rgba(255,255,255,.12);border-radius:6px;background:rgba(0,0,0,.35);font-size:14px;outline:none}
+.in:focus{border-color:rgba(110,255,192,.55)}
+textarea.in{min-height:90px;resize:vertical;font:13.5px/1.5 var(--sans)}
+.toggle{display:flex;align-items:center;gap:12px;cursor:pointer;user-select:none}
+.toggle .sw{width:44px;height:24px;border-radius:12px;background:#1c2622;position:relative;flex-shrink:0;transition:.2s}
+.toggle .sw:after{content:"";position:absolute;left:3px;top:3px;width:18px;height:18px;border-radius:50%;background:#5d6d66;transition:.2s}
+.toggle.on .sw{background:rgba(110,255,192,.35)}.toggle.on .sw:after{left:23px;background:var(--m)}
+.toggle.red.on .sw{background:rgba(255,107,122,.35)}.toggle.red.on .sw:after{background:var(--r)}
+.bar{height:7px;background:#1a2320;border-radius:4px;overflow:hidden}.bar span{display:block;height:100%;background:var(--m)}
+.bar span.warn{background:var(--g)}.bar span.bad{background:var(--r)}
+.chart{height:150px;display:flex;align-items:flex-end;gap:6px;padding:10px 0 20px}
+.chart div{flex:1;background:linear-gradient(180deg,rgba(110,255,192,.55),rgba(110,255,192,.12));border-radius:3px 3px 0 0;position:relative;min-height:2px}
+.chart div span{position:absolute;bottom:-18px;left:0;right:0;text-align:center;font:9.5px var(--mono);color:var(--dim)}
+.chart div b{position:absolute;top:-16px;left:0;right:0;text-align:center;font:600 9.5px var(--mono);color:#9fb0a8}
+.tbl{width:100%;overflow:auto}
+table{width:100%;border-collapse:collapse;font-size:12.5px}
+th{text-align:left;font:600 9.5px var(--mono);letter-spacing:.14em;color:var(--dim);padding:8px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
+td{padding:9px 10px;border-bottom:1px solid rgba(255,255,255,.04);vertical-align:middle}
+tr.click{cursor:pointer}tr.click:hover td{background:rgba(255,255,255,.025)}tr.sel td{background:rgba(110,255,192,.06)}
+.who b{display:block;font-weight:600}.who small{font:10.5px var(--mono);color:var(--dim)}
+.tag{display:inline-block;font:600 9.5px var(--mono);padding:2px 7px;border-radius:3px;letter-spacing:.06em;white-space:nowrap}
+.tag.pass{background:rgba(255,207,110,.15);color:var(--g)}.tag.red{background:rgba(255,107,122,.15);color:var(--r)}.tag.ok{background:rgba(110,255,192,.14);color:var(--m)}.tag.blue{background:rgba(110,200,255,.14);color:var(--b)}.tag.dim{background:rgba(255,255,255,.06);color:#9fb0a8}
+.mono{font-family:var(--mono);font-size:12px}
+.muted{color:var(--dim)}
+.empty{padding:28px 12px;text-align:center;font:12.5px var(--mono);color:var(--dim);border:1px dashed rgba(255,255,255,.12);border-radius:8px}
+.err{padding:12px 14px;border:1px solid rgba(255,107,122,.4);background:rgba(255,107,122,.06);border-radius:8px;color:#ffb3bc;font-size:13px}
+.skel{height:70px;border-radius:8px;background:linear-gradient(90deg,rgba(255,255,255,.02),rgba(255,255,255,.05),rgba(255,255,255,.02));background-size:200% 100%;animation:sk 1.2s infinite}
+@keyframes sk{to{background-position:-200% 0}}
+.split{display:grid;grid-template-columns:minmax(0,1fr) 400px;gap:16px;align-items:start}
+.kv{display:grid;grid-template-columns:130px minmax(0,1fr);gap:6px 10px;font-size:12.5px;margin-bottom:14px}
+.kv span{color:var(--dim);font-family:var(--mono);font-size:11.5px}.kv b{font-weight:500;color:#d3dcd8;word-break:break-all}
+.mini{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:12px 0}
+.mini div{padding:9px 10px;border:1px solid var(--line);border-radius:6px}.mini b{display:block;font:700 17px var(--disp)}.mini span{font:9.5px var(--mono);color:var(--dim);letter-spacing:.1em}
+.pager{display:flex;gap:6px;align-items:center;justify-content:flex-end;margin-top:10px;font:11.5px var(--mono);color:var(--dim)}
+.row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.item{padding:12px 14px;border:1px solid var(--line);border-radius:6px;margin-bottom:8px;background:rgba(0,0,0,.15)}
+.item.bad{border-color:rgba(255,107,122,.45)}.item.warn{border-color:rgba(255,207,110,.4)}
+.item .t{font-weight:600}.item p{margin:6px 0 0;font-size:13px;color:#b8c4bf;line-height:1.5;white-space:pre-wrap;word-break:break-word}
+.item small{font:10.5px var(--mono);color:var(--dim)}
+.seats{display:flex;gap:3px;margin-top:6px}.seats i{width:14px;height:14px;border-radius:3px;background:rgba(255,255,255,.08)}.seats i.f{background:rgba(110,255,192,.5)}.seats i.x{background:rgba(255,107,122,.6)}
+/* modal + toast */
+#modal{position:fixed;inset:0;background:rgba(0,0,0,.7);display:flex;align-items:center;justify-content:center;padding:16px;z-index:50}
+#modal .box{width:100%;max-width:460px;max-height:90vh;overflow:auto;background:#0b100e;border:1px solid rgba(255,255,255,.14);border-radius:10px;padding:20px}
+#modal h2{margin:0 0 8px;font:700 18px var(--disp)}#modal .body{font-size:13.5px;color:#c3cfc9;line-height:1.55;margin-bottom:14px}
+#toasts{position:fixed;right:16px;bottom:16px;display:flex;flex-direction:column;gap:8px;z-index:60}
+.toast{padding:10px 14px;border-radius:7px;font-size:13px;background:#0e1513;border:1px solid rgba(110,255,192,.4);color:#d6f5e6;box-shadow:0 8px 24px rgba(0,0,0,.4);max-width:360px;animation:tin .2s}
+.toast.bad{border-color:rgba(255,107,122,.5);color:#ffd0d6}
+@keyframes tin{from{transform:translateY(8px);opacity:0}}
+/* phone */
+.mnav{display:none}
+@media (max-width:900px){
+  #app{grid-template-columns:1fr}
+  .side{position:fixed;inset:0 30% 0 0;z-index:40;transform:translateX(-105%);transition:.25s;box-shadow:20px 0 40px rgba(0,0,0,.5)}
+  .side.open{transform:none}
+  .top{padding:10px 14px}.top .sub{display:none}.help{margin:12px 14px 0}
+  #content{padding:14px 14px calc(80px + env(safe-area-inset-bottom,0px))}
+  .grid2,.grid2.even,.split{grid-template-columns:1fr}
+  .kv{grid-template-columns:110px minmax(0,1fr)}
+  .mnav{display:grid;grid-template-columns:repeat(5,1fr);position:fixed;left:0;right:0;bottom:0;z-index:30;border-top:1px solid var(--line);background:#050807;padding-bottom:env(safe-area-inset-bottom,0px)}
+  .mnav button{padding:9px 0 11px;font:600 9.5px var(--mono);letter-spacing:.06em;color:#6f8079;position:relative}
+  .mnav button.on{color:var(--m)}.mnav button i{display:block;font-style:normal;font-size:16px;margin-bottom:2px}
+  .mnav button em{position:absolute;top:4px;right:calc(50% - 22px);font:600 9px var(--mono);font-style:normal;background:var(--r);color:#fff;border-radius:8px;padding:0 5px}
+  .menu-btn{display:inline-flex !important}
+}
+/* weekly rewards */
+.wa-ph{display:flex;align-items:center;gap:12px;flex-wrap:wrap}.wa-ph .r{margin-left:auto}
+.wa-grid{display:grid;grid-template-columns:repeat(12,minmax(0,1fr));gap:14px}
+.wa-c4{grid-column:span 4}.wa-c5{grid-column:span 5}.wa-c7{grid-column:span 7}.wa-c12{grid-column:span 12}
+.wa-big{font:700 24px var(--disp)}.wa-big small{font:500 12px var(--mono);color:var(--dim)}
+.wa-note{font-size:12.5px;color:var(--dim);line-height:1.55;margin-top:8px}.wa-note b{color:#fff}
+.wa-in{display:flex;align-items:center;gap:8px;background:rgba(0,0,0,.35);border:1px solid rgba(255,255,255,.14);border-radius:8px;padding:6px 8px 6px 12px;font-weight:700}
+.wa-in input{background:none;border:none;color:#fff;font:700 18px var(--disp);width:80px;outline:none}.wa-in span{color:var(--dim);font:500 11px var(--mono);flex:1;white-space:nowrap}
+.wa-warn{border-left:3px solid var(--g);background:rgba(255,207,110,.07);padding:10px 12px;border-radius:0 8px 8px 0;font-size:12.5px;color:#e8dfc0;line-height:1.5}
+.wa-steps{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.wa-step{border:1px dashed rgba(110,255,192,.3);border-radius:8px;padding:10px 12px;font-size:12.5px;color:#c2ccc8;line-height:1.5}.wa-step b{display:block;color:#fff;margin-bottom:3px}
+.wa-step.done{border-style:solid;border-color:rgba(110,255,192,.45);background:rgba(110,255,192,.05)}.wa-step.done b{color:var(--m)}
+.wa-gold{border-color:rgba(255,207,110,.45);background:linear-gradient(135deg,rgba(255,207,110,.08),rgba(255,255,255,.02))}
+.wa-lbl{font:600 11px var(--mono);color:var(--dim);letter-spacing:.1em}.wa-cd{font:700 40px var(--mono);color:var(--g)}
+.wa-rk{display:grid;grid-template-columns:30px minmax(0,1fr) auto auto;gap:12px;align-items:center;padding:3px 0;font-size:13px}.wa-rk .p{font:700 12px var(--mono);color:var(--g)}.wa-no{color:#ffb84d}
+@media (max-width:900px){.wa-c4,.wa-c5,.wa-c7{grid-column:span 12}.wa-steps{grid-template-columns:1fr}}
+.menu-btn{display:none;font:600 18px var(--mono);padding:2px 8px;border:1px solid var(--line);border-radius:5px}
+</style>
+</head>
+<body>
+
+<div id="login">
+  <div class="lbox">
+    <h1>SABOTEUR ADMIN</h1>
+    <p>Sign in to run the game.</p>
+    <div class="field"><label>USERNAME</label><input class="in" id="lu" autocomplete="username"></div>
+    <div class="field"><label>PASSWORD</label><input class="in" id="lp" type="password" autocomplete="current-password"></div>
+    <div id="lerr" class="err hidden" style="margin-bottom:12px"></div>
+    <button class="btn solid" id="lbtn" style="width:100%;justify-content:center;padding:11px">SIGN IN</button>
+  </div>
+</div>
+
+<div id="app" class="hidden">
+  <aside class="side" id="side"></aside>
+  <section class="main">
+    <div class="top">
+      <button class="menu-btn" id="menuBtn" aria-label="Menu">☰</button>
+      <div><h1 id="ttl">OVERVIEW</h1><div class="sub" id="sub"></div></div>
+      <div class="r">
+        <span class="upd" id="upd"></span>
+        <button class="helpbtn" id="helpBtn">? HOW THIS WORKS</button>
+        <span class="pill" id="netPill">…</span>
+      </div>
+    </div>
+    <div class="help hidden" id="help"></div>
+    <div id="content"></div>
+  </section>
+  <nav class="mnav" id="mnav"></nav>
+</div>
+<div id="modal" class="hidden"><div class="box" id="mbox"></div></div>
+<div id="toasts"></div>
+
+<script>
+(() => {
+'use strict';
+/* ============ basics ============ */
+const $ = (s, el = document) => el.querySelector(s);
+const esc = (t) => String(t == null ? '' : t).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const num = (n, d = 0) => (n == null || isNaN(n) ? '—' : Number(n).toLocaleString(undefined, { maximumFractionDigits: d }));
+const near = (n) => (n == null ? '—' : `${num(n, 3)}`);
+const when = (d) => { if (!d) return '—'; const t = new Date(d); const s = (Date.now() - t) / 1000; if (s < 60) return 'just now'; if (s < 3600) return `${Math.floor(s / 60)}m ago`; if (s < 86400) return `${Math.floor(s / 3600)}h ago`; if (s < 86400 * 7) return `${Math.floor(s / 86400)}d ago`; return t.toLocaleDateString(); };
+const full = (d) => (d ? new Date(d).toLocaleString() : '—');
+let TOKEN = localStorage.getItem('nsAdminToken') || null;
+let ROLE = localStorage.getItem('nsAdminRole') || 'full';
+let NET = 'testnet';
+const isFull = () => ROLE === 'full';
+const explorer = (tx, main) => `https://${main || NET === 'mainnet' ? '' : 'testnet.'}nearblocks.io/txns/${encodeURIComponent(tx)}`;
+
+async function api(path, opts = {}) {
+  const o = { ...opts, headers: { ...(opts.headers || {}), ...(TOKEN ? { Authorization: 'Bearer ' + TOKEN } : {}) } };
+  if (o.json !== undefined) { o.method = o.method || 'POST'; o.headers['Content-Type'] = 'application/json'; o.body = JSON.stringify(o.json); delete o.json; }
+  const r = await fetch(path, o);
+  const data = await r.json().catch(() => ({}));
+  if (r.status === 401 && !path.startsWith('/admin/login')) { logout(true); throw new Error('Your admin session ended - sign in again.'); }
+  if (!r.ok) throw new Error(data.message || `Request failed (${r.status})`);
+  return data;
+}
+async function download(path, name) {
+  try {
+    const r = await fetch(path, { headers: { Authorization: 'Bearer ' + TOKEN } });
+    if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.message || 'Download failed'); }
+    const url = URL.createObjectURL(await r.blob());
+    const a = Object.assign(document.createElement('a'), { href: url, download: name });
+    document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 2000);
+    toast(`Downloaded ${name}`);
+  } catch (e) { toast(e.message, true); }
+}
+function toast(msg, bad) {
+  const el = Object.assign(document.createElement('div'), { className: 'toast' + (bad ? ' bad' : ''), textContent: msg });
+  $('#toasts').appendChild(el); setTimeout(() => el.remove(), bad ? 6000 : 3500);
+}
+// Promise-based dialog: { title, body, ok, danger, input:{label,placeholder,value,textarea}, choices:[...] }
+function ask(o) {
+  return new Promise((resolve) => {
+    const m = $('#modal'), box = $('#mbox');
+    const inp = o.input ? (o.input.textarea ? `<textarea class="in" id="mIn" placeholder="${esc(o.input.placeholder || '')}">${esc(o.input.value || '')}</textarea>` : `<input class="in" id="mIn" placeholder="${esc(o.input.placeholder || '')}" value="${esc(o.input.value || '')}">`) : '';
+    box.innerHTML = `<h2>${esc(o.title)}</h2><div class="body">${o.body || ''}</div>
+      ${o.input ? `<div class="field"><label>${esc(o.input.label || '')}</label>${inp}${o.input.hint ? `<div class="hint">${esc(o.input.hint)}</div>` : ''}</div>` : ''}
+      <div class="acts" style="justify-content:flex-end"><button class="btn ghost" id="mNo">${esc(o.cancel || 'Cancel')}</button>${o.ok === false ? '' : `<button class="btn ${o.danger ? 'red' : 'solid'}" id="mOk">${esc(o.ok || 'OK')}</button>`}</div>`;
+    m.classList.remove('hidden');
+    const done = (v) => { m.classList.add('hidden'); box.innerHTML = ''; document.removeEventListener('keydown', key); resolve(v); };
+    const key = (e) => { if (e.key === 'Escape') done(null); if (e.key === 'Enter' && !(o.input && o.input.textarea) && $('#mOk')) $('#mOk').click(); };
+    document.addEventListener('keydown', key);
+    $('#mNo').onclick = () => done(null);
+    if ($('#mOk')) $('#mOk').onclick = () => done(o.input ? ($('#mIn').value) : true);
+    m.onclick = (e) => { if (e.target === m) done(null); };
+    setTimeout(() => ($('#mIn') || $('#mOk') || $('#mNo')).focus(), 30);
+  });
+}
+const modalOpen = () => !$('#modal').classList.contains('hidden');
+function pager(page, pages, go) {
+  if (!pages || pages <= 1) return '';
+  const id = 'p' + Math.random().toString(36).slice(2, 8);
+  setTimeout(() => { const el = document.getElementById(id); if (!el) return; el.querySelectorAll('button').forEach((b) => b.onclick = () => go(Number(b.dataset.p))); });
+  return `<div class="pager" id="${id}"><button class="btn ghost" data-p="${page - 1}" ${page <= 1 ? 'disabled' : ''}>‹ Prev</button><span>Page ${page} of ${pages}</span><button class="btn ghost" data-p="${page + 1}" ${page >= pages ? 'disabled' : ''}>Next ›</button></div>`;
+}
+// event delegation: any element with data-act="name" calls ACT[name](el)
+const ACT = {};
+document.addEventListener('click', (e) => {
+  const el = e.target.closest('[data-act]'); if (!el) return;
+  const f = ACT[el.dataset.act]; if (f) { e.preventDefault(); f(el, e); }
+});
+async function act(btn, fn, okMsg) {
+  if (btn) { btn.disabled = true; btn.dataset.label = btn.innerHTML; btn.innerHTML = 'Working…'; }
+  try { const r = await fn(); if (okMsg) toast(okMsg); return r; }
+  catch (e) { toast(e.message, true); }
+  finally { if (btn && btn.isConnected) { btn.disabled = false; btn.innerHTML = btn.dataset.label; } }
+}
+const guard = (html) => (isFull() ? html : '');
+
+/* ============ pages ============ */
+const STATE = { counts: {} };
+const PAGES = {
+  overview: { grp: 'RUN THE GAME', label: 'Overview', icon: '◉', title: 'OVERVIEW', sub: 'What needs you, at a glance', refresh: 20,
+    help: `<b>Start here every day.</b> The top numbers are live. <b>Needs you now</b> lists only things that are waiting on you — click one to jump to it. When it's empty, nothing is broken.<ul><li><b>Emergency pause</b> stops NEW pool and paid games from starting (Free Play and running matches keep going). Use it if money looks wrong.</li><li><b>Matches</b> counts real matches (not one row per player).</li><li>The free database has no automatic backup — download one now and then.</li></ul>` },
+  live: { grp: 'RUN THE GAME', label: 'Live now', icon: '●', title: 'LIVE NOW', sub: 'Rooms and matches happening right now', refresh: 4,
+    help: `Every room open on the server right now, refreshed every few seconds. Click a room to see each player's role, whether they're alive, their missions or kills, and the room's standings. Pool rooms end and settle by themselves (see Pools & paid games); you can't close a room from here.` },
+  players: { grp: 'RUN THE GAME', label: 'Players', icon: '☺', title: 'PLAYERS', sub: 'Find anyone, open their profile, act on it', refresh: 0,
+    help: `Search by name, @username, email or wallet. Click a player for their full profile on the right.<ul><li><b>Hold</b> logs them out everywhere, kicks them out of any room and blocks sign-in until you release them.</li><li><b>Gift Play Pass</b> for some days or forever; <b>Remove</b> takes it away.</li><li><b>Approve wallet reset</b> appears only when the player asked to reset a lost in-game wallet.</li></ul>` },
+  rooms: { grp: 'RUN THE GAME', label: 'Match history', icon: '☰', title: 'MATCH HISTORY', sub: 'Every room that ever ran, and every match in it', refresh: 0,
+    help: `One row per room session (a room code can be reused later, so each session is separate). Click one to see every player's result in every match: role, win/loss, points, missions, kills.` },
+  playpass: { grp: 'MONEY', label: 'Play Pass', icon: '★', title: 'PLAY PASS', sub: 'Real NEAR sales, refunds owed, price and holders', refresh: 30,
+    help: `<b>How a sale works:</b> the player pays real NEAR on <b>mainnet</b> from their own wallet straight to <b>saboteur.near</b>, after signing a message proving the wallet is theirs. The server checks the transaction on-chain and switches Play Pass on. The server never holds that wallet's key.<ul><li><b>Refunds owed</b>: NEAR arrived but Play Pass couldn't be switched on (underpaid, already had it, or sales were off). Send the NEAR back yourself from saboteur.near, then press <b>Mark refunded</b> and paste the refund tx — the player gets an Inbox message.</li><li>Once Play Pass is active, sales are final.</li><li>Price changes apply to the next purchase immediately. A bigger discount also posts a News announcement.</li></ul>` },
+  pools: { grp: 'MONEY', label: 'Pools & paid games', icon: '◈', title: 'POOLS & PAID GAMES', sub: 'Every on-chain pool, its money, and anything stuck', refresh: 20,
+    help: `Testnet pools and paid games hold test NEAR in the pool contract until the last match, then pay the top 3 automatically. <b>Needs attention</b> = a payout failed, or a pool sat open/locked too long.<ul><li><b>Resolve now</b> retries the right action (pay out, or refund if no match finished).</li><li>A player can report a stuck payment; you can refund just them or mark it resolved.</li><li><b>Transactions</b> is the full money log: who paid whom, with explorer links.</li></ul>` },
+  weekly: { grp: 'MONEY', label: 'Weekly rewards', icon: '🏆', title: 'WEEKLY REWARDS', sub: 'Real NEAR for the weekly top 3 · paid by the Saboteur Agent on NEAR Intents', refresh: 15,
+    help: `<b>First time:</b> connect <b>saboteur.near</b> and sign twice (create the agent with its rules, then allow the game). Then add funds to the agent's deposit address. After that it runs itself: at every weekly reset the top 3 are queued as one batch, wait <b>30 minutes</b> (you can Send now or Cancel this week), then the agent sends them together. Change the prize any time; switch it off any time.<ul><li>The agent can only <b>withdraw NEAR</b>, up to a weekly $ cap and a per-payment cap that saboteur.near signed. The game server never holds saboteur.near's key.</li><li><b>Freeze</b> stops all payments; <b>Withdraw</b> sends everything back to saboteur.near.</li><li>Do the setup on the <b>live</b> admin (Render): that's where the game's permission is stored.</li></ul>` },
+  wallets: { grp: 'MONEY', label: 'Wallets & revenue', icon: '◎', title: 'WALLETS & REVENUE', sub: 'Balances of every game wallet and what came in', refresh: 60,
+    help: `<b>saboteur.near</b> is mainnet (real NEAR, Play Pass). Everything else here is <b>testnet</b> (test NEAR, no value): the pool contract holds pool money, the oracle pays gas and prizes, the owner wallet collects the 5% pool fee. Testnet totals and the mainnet Play Pass money are never added together.` },
+  saboteur: { grp: 'MONEY', label: '$SABOTEUR', icon: '◆', title: '$SABOTEUR ECONOMY', sub: 'Testnet reward token: wallets, payouts, abuse flags', refresh: 60,
+    help: `Every finished match pays $SABOTEUR (testnet, no value) by rank; Play Pass holders get 2×. Rewards are paid from the <b>rewards wallet</b>; refill it from the treasury (its key stays offline on your Mac). <b>Farm flags</b> lists accounts with suspicious patterns (many solo/top-3 matches) worth a look.` },
+  reports: { grp: 'COMMUNITY', label: 'Reports', icon: '!', title: 'REPORTS', sub: 'Disputes and feedback sent from the game', refresh: 30,
+    help: `Players send these from Inbox → Report an issue. <b>Resolve</b> closes it and (by default) sends them a short thank-you in their Inbox; you can write your own reply instead, or send nothing. Your private note is only visible here.` },
+  inbox: { grp: 'COMMUNITY', label: 'Inbox messages', icon: '✉', title: 'INBOX MESSAGES', sub: 'Message one player, and everything the game has sent', refresh: 0,
+    help: `Send a private message to one player — it lands in their in-game Inbox. Below is every Inbox message sent (by you or automatically: prizes, refunds, Play Pass). Deleting removes it from the player's Inbox too.` },
+  news: { grp: 'COMMUNITY', label: 'News', icon: '✦', title: 'NEWS', sub: 'Announcements every player sees', refresh: 0,
+    help: `Posts show in the game's News tab for everyone. Set "expires in" to hide it automatically after some days. Keep it short — title is what most players read.` },
+  avatars: { grp: 'COMMUNITY', label: 'Custom avatars', icon: '☻', title: 'CUSTOM AVATARS', sub: 'Paid requests for a personal character', refresh: 0,
+    help: `Play Pass players can request their own character (shown in the Play Pass screen). Set the price, your Telegram link for follow-ups, and turn requests on/off. Reply goes to the player's Inbox.` },
+  leaderboard: { grp: 'COMMUNITY', label: 'Leaderboard', icon: '▲', title: 'LEADERBOARD', sub: 'Weekly and monthly ranks', refresh: 0,
+    help: `Weekly resets every Saturday and monthly on the 1st automatically. <b>Reset now</b> starts a fresh board immediately — players keep their match history, only the board restarts.` },
+  log: { grp: 'SYSTEM', label: 'Activity log', icon: '≡', title: 'ACTIVITY LOG', sub: 'Every admin action and important money event', refresh: 30,
+    help: `A record of every admin action (who was held, what was gifted, refunds, price changes, failed admin logins) and key automatic events. Click a row for the details.` },
+  system: { grp: 'SYSTEM', label: 'Backups & usage', icon: '⚙', title: 'BACKUPS & USAGE', sub: 'Download your data, watch free-tier limits', refresh: 0,
+    help: `The free MongoDB has no automatic backups. <b>Full backup</b> downloads everything as one JSON file — keep it somewhere safe. CSVs are handy for spreadsheets.` },
+};
+const MOBILE_TABS = ['overview', 'live', 'players', 'playpass', 'reports'];
+let current = 'overview', param = null, timer = null, lastLoad = 0;
+
+function renderSide() {
+  const c = STATE.counts;
+  const badge = { overview: c.attention ? `<em>${c.attention}</em>` : '', live: c.live ? `<em class="ok">${c.live}</em>` : '', playpass: c.refunds ? `<em>${c.refunds}</em>` : '', pools: c.pools ? `<em class="g">${c.pools}</em>` : '', reports: c.reports ? `<em>${c.reports}</em>` : '', avatars: c.avatars ? `<em class="g">${c.avatars}</em>` : '', weekly: '<em class="g">NEW</em>' };
+  let g = '', html = `<div class="brand"><i></i><div><b>SABOTEUR</b><small>ADMIN · ${esc(NET.toUpperCase())}</small></div></div>`;
+  for (const [k, p] of Object.entries(PAGES)) {
+    if (p.grp !== g) { g = p.grp; html += `<div class="grp">${g}</div>`; }
+    html += `<button class="nav ${k === current ? 'on' : ''}" data-act="go" data-p="${k}">${esc(p.label)}${badge[k] || ''}</button>`;
+  }
+  html += `<div class="foot">Signed in · <b>${isFull() ? 'full admin' : 'view only'}</b><br><button class="btn ghost" data-act="logout" style="margin-top:8px">Sign out</button></div>`;
+  $('#side').innerHTML = html;
+  $('#mnav').innerHTML = MOBILE_TABS.map((k) => `<button class="${k === current ? 'on' : ''}" data-act="go" data-p="${k}"><i>${PAGES[k].icon}</i>${esc(PAGES[k].label.split(' ')[0].toUpperCase())}${badge[k] && /<em/.test(badge[k]) && k !== 'live' ? `<em>${badge[k].replace(/<[^>]+>/g, '')}</em>` : ''}</button>`).join('');
+}
+ACT.go = (el) => { $('#side').classList.remove('open'); go(el.dataset.p); };
+ACT.logout = () => logout();
+$('#menuBtn').onclick = (e) => { e.stopPropagation(); $('#side').classList.toggle('open'); };
+document.querySelector('.main').addEventListener('click', () => $('#side').classList.remove('open'));
+$('#helpBtn').onclick = () => { const h = $('#help'); h.classList.toggle('hidden'); localStorage.setItem('nsAdminHelp_' + current, h.classList.contains('hidden') ? '0' : '1'); };
+
+function go(page, p = null, push = true) {
+  if (!PAGES[page]) page = 'overview';
+  current = page; param = p;
+  if (push) history.replaceState(null, '', `#/${page}${p ? '/' + encodeURIComponent(p) : ''}`);
+  const P = PAGES[page];
+  $('#ttl').textContent = P.title; $('#sub').textContent = P.sub;
+  $('#help').innerHTML = P.help;
+  const seen = localStorage.getItem('nsAdminHelp_' + page);
+  $('#help').classList.toggle('hidden', seen === '0' || (seen === null && page !== 'overview'));
+  renderSide();
+  $('#content').innerHTML = '<div class="skel"></div><div class="skel"></div>';
+  $('#content').scrollTop = 0;
+  load(true);
+}
+async function load(first) {
+  clearTimeout(timer);
+  const page = current;
+  // never refresh under the admin's hands: typing, a dialog open, or tab hidden
+  const busy = !first && (modalOpen() || document.visibilityState !== 'visible' || (document.activeElement && $('#content').contains(document.activeElement) && /INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName)));
+  if (!busy) {
+    try {
+      const scroll = $('#content').scrollTop;
+      if (first) $('#content').innerHTML = '<div class="empty">Loading…</div>'; // show something right away
+      await R[page]($('#content'), first);
+      if (!first) $('#content').scrollTop = scroll;
+      lastLoad = Date.now();
+    } catch (e) { if (first) $('#content').innerHTML = `<div class="err">Couldn't load this page: ${esc(e.message)}</div>`; }
+  }
+  const s = PAGES[page].refresh;
+  if (s && page === current) timer = setTimeout(() => load(false), s * 1000);
+}
+setInterval(() => { $('#upd').textContent = lastLoad ? `updated ${when(lastLoad).replace('just now', 'now')}` : ''; }, 5000);
+async function refreshCounts() {
+  try {
+    const d = await api('/admin/counts');
+    STATE.counts = { attention: (d.refundsOwed || 0) + (d.needsAttentionCount || 0) + (d.openReports || 0) + (d.customAvatarPending || 0), live: d.activeRooms, refunds: d.refundsOwed, pools: d.needsAttentionCount, reports: d.openReports, avatars: d.customAvatarPending };
+    NET = d.network || NET;
+    $('#netPill').textContent = NET.toUpperCase(); $('#netPill').className = 'pill ' + (NET === 'mainnet' ? 'main' : 'live');
+    renderSide();
+  } catch (e) { /* shown by the page itself */ }
+}
+
+/* ============ renderers ============ */
+const R = {};
+
+R.overview = async (el) => {
+  const ov = await api('/admin/overview'); STATE.overview = ov; refreshCounts();
+  const d = STATE.overview || {};
+  const [db, set] = await Promise.all([api('/admin/db-stats').catch(() => null), api('/admin/settings').catch(() => ({}))]);
+  const max = Math.max(1, ...(d.matchesByDay || []).map((x) => x.matches));
+  const needs = [];
+  if (d.refundsOwed) needs.push(['red', `Play Pass refund${d.refundsOwed > 1 ? 's' : ''} owed · ${d.refundsOwed}`, 'Real NEAR arrived but Play Pass was not switched on', 'playpass']);
+  if (d.needsAttentionCount) needs.push(['gold', `${d.needsAttentionCount} pool${d.needsAttentionCount > 1 ? 's' : ''} need attention`, 'A payout failed or a pool is stuck open/locked', 'pools']);
+  if (d.openReports) needs.push(['red', `${d.openReports} open report${d.openReports > 1 ? 's' : ''}`, 'Disputes and feedback from players', 'reports']);
+  if (d.customAvatarPending) needs.push(['blue', `${d.customAvatarPending} custom avatar request${d.customAvatarPending > 1 ? 's' : ''}`, 'Waiting for your reply', 'avatars']);
+  if (d.manualPoolsUnpaid) needs.push(['blue', `${d.manualPoolsUnpaid} Real-NEAR pool${d.manualPoolsUnpaid > 1 ? 's' : ''} with unpaid winners`, 'The pool host pays these by hand — nothing for you to do unless a player disputes it', 'reports']);
+  const paused = !!set.poolsPaused;
+  el.innerHTML = `
+    <div class="kpis">
+      <button class="kpi" data-act="go" data-p="players"><span>PLAYERS</span><b>${num(d.totalPlayers)}</b><small>+${num(d.newPlayersToday)} today · ${num(d.activePlayers24h)} active 24h</small></button>
+      <button class="kpi" data-act="go" data-p="live"><span>ONLINE NOW</span><b>${num(d.playersOnline)}</b><small>${num(d.activeRooms)} rooms · ${num(d.activeGames)} matches</small></button>
+      <button class="kpi" data-act="go" data-p="rooms"><span>MATCHES TODAY</span><b>${num(d.matchesToday)}</b><small>${num(d.totalMatches)} all time</small></button>
+      <button class="kpi" data-act="go" data-p="playpass"><span>PLAY PASS SOLD</span><b>${num(d.playPassSold)}</b><small>${near(d.playPassRevenueNear)} NEAR · ${esc(d.playPassWallet || '')}</small></button>
+      <button class="kpi" data-act="go" data-p="reports"><span>OPEN REPORTS</span><b style="color:${d.openReports ? 'var(--r)' : 'inherit'}">${num(d.openReports)}</b><small>disputes + feedback</small></button>
+    </div>
+    <div class="grid2">
+      <div class="card"><h3>NEEDS YOU NOW <span class="r">${needs.length ? needs.length + ' item' + (needs.length > 1 ? 's' : '') : 'all clear'}</span></h3>
+        ${needs.length ? needs.map(([c, t, s, p]) => `<button class="att ${c}" data-act="go" data-p="${p}"><i></i><div class="t"><b>${esc(t)}</b><span>${esc(s)}</span></div><span class="btn ghost">Open ›</span></button>`).join('') : '<div class="empty">Nothing is waiting on you. 🎉</div>'}
+      </div>
+      <div class="card"><h3>EMERGENCY PAUSE</h3>
+        <div class="toggle red ${paused ? 'on' : ''}" ${isFull() ? 'data-act="pause"' : ''}><div class="sw"></div><div><b style="font-weight:600">${paused ? 'NEW pool & paid games are PAUSED' : 'Pool & paid games are running'}</b><div class="muted" style="font-size:12px;margin-top:3px;line-height:1.5">${paused ? 'Players can\'t start new ones. Running matches and Free Play continue. Tap to resume.' : 'Tap to stop NEW pool / paid games from starting. Free Play and running matches are not affected.'}</div></div></div>
+        <div style="height:1px;background:var(--line);margin:16px 0"></div>
+        <h3>DATABASE</h3>
+        ${db ? `<div class="row" style="justify-content:space-between;font:11.5px var(--mono);color:#b8c4bf;margin-bottom:5px"><span>Storage</span><span>${db.storageUsedMb} / ${db.storageLimitMb} MB</span></div><div class="bar"><span class="${db.percentUsed > 85 ? 'bad' : db.percentUsed > 60 ? 'warn' : ''}" style="width:${Math.min(100, db.percentUsed)}%"></span></div><div class="muted mono" style="margin-top:8px">Server up ${Math.round(db.serverUptimeSeconds / 3600)}h</div>` : '<div class="muted">Unavailable</div>'}
+      </div>
+    </div>
+    <div class="grid2">
+      <div class="card"><h3>REAL MATCHES · LAST 14 DAYS <span class="r">peak ${num(max)}</span></h3>
+        <div class="chart">${(d.matchesByDay || []).map((x) => `<div style="height:${Math.max(2, (x.matches / max) * 100)}%" title="${x.day}: ${x.matches} matches">${x.matches ? `<b>${x.matches}</b>` : ''}<span>${x.day.slice(8)}</span></div>`).join('')}</div>
+      </div>
+      <div class="card"><h3>BACKUPS</h3><p class="d">The free database has no automatic backups. Download one now and then and keep it safe.</p>
+        <div class="acts"><button class="btn solid" data-act="dl" data-u="/admin/backup/export" data-n="backup.json">⬇ Full backup (JSON)</button><button class="btn" data-act="dl" data-u="/admin/export/csv?type=players" data-n="players.csv">Players CSV</button><button class="btn" data-act="dl" data-u="/admin/export/csv?type=matches" data-n="matches.csv">Matches CSV</button><button class="btn" data-act="dl" data-u="/admin/export/csv?type=funds" data-n="money.csv">Money CSV</button></div></div>
+    </div>`;
+};
+ACT.dl = (b) => download(b.dataset.u, b.dataset.n.replace('.', `-${new Date().toISOString().slice(0, 10)}.`));
+ACT.pause = async () => {
+  const s = await api('/admin/settings'); const next = !s.poolsPaused;
+  const ok = await ask({ title: next ? 'Pause new pool & paid games?' : 'Resume pool & paid games?', body: next ? 'Players won\'t be able to start NEW pool or paid games until you resume. Free Play and matches already running are not affected.' : 'Players can start pool and paid games again.', ok: next ? 'Pause' : 'Resume', danger: next });
+  if (!ok) return;
+  await act(null, () => api('/admin/settings/pools-paused', { json: { value: next } }), next ? 'Paused' : 'Resumed'); load(false);
+};
+
+R.live = async (el) => {
+  refreshCounts(); // badges update in the background - never hold the page
+  if (param) return R.liveRoom(el);
+  const d = await api('/admin/live-rooms');
+  el.innerHTML = d.rooms.length ? `<div class="card" style="padding:8px 10px"><div class="tbl"><table><tr><th>ROOM</th><th>STATUS</th><th>PLAYERS</th><th></th></tr>${d.rooms.map((r) => `
+    <tr class="click" data-act="room" data-c="${esc(r.code)}"><td class="mono" style="color:var(--m);font-weight:700">${esc(r.code)}</td><td>${r.gameStarted ? '<span class="tag ok">IN MATCH</span>' : '<span class="tag blue">LOBBY</span>'} ${r.inMeeting ? '<span class="tag red">MEETING</span>' : ''}</td><td>${r.playerCount}</td><td style="text-align:right"><span class="btn ghost">Open ›</span></td></tr>`).join('')}</table></div></div>` : '<div class="empty">No rooms open right now. When players start one it shows up here within seconds.</div>';
+};
+ACT.room = (el) => go('live', el.dataset.c);
+R.liveRoom = async (el) => {
+  let r;
+  try { r = await api('/admin/live-rooms/' + encodeURIComponent(param)); }
+  catch (e) { el.innerHTML = `<div><button class="btn ghost" data-act="go" data-p="live">‹ All rooms</button></div><div class="empty">Room ${esc(param)} has ended.</div>`; return; }
+  el.innerHTML = `<div class="row"><button class="btn ghost" data-act="go" data-p="live">‹ All rooms</button><b class="mono" style="font-size:16px;color:var(--m)">${esc(r.code)}</b>${r.gameStarted ? '<span class="tag ok">IN MATCH</span>' : '<span class="tag blue">LOBBY</span>'}${r.inMeeting ? '<span class="tag red">MEETING</span>' : ''}${r.pool ? `<span class="tag pass">${esc(r.pool.poolName || 'POOL')} · ${esc(r.pool.state)}</span>` : ''}${r.winner ? `<span class="tag dim">winner: ${esc(r.winner)}</span>` : ''}</div>
+    <div class="grid2"><div class="card"><h3>PLAYERS</h3><div class="tbl"><table><tr><th>PLAYER</th><th>ROLE</th><th>STATUS</th><th>PROGRESS</th></tr>
+      ${r.players.map((p) => `<tr><td class="who"><b>${esc(p.name || '(unnamed)')}${p.isHost ? ' <span class="tag dim">HOST</span>' : ''}</b><small>${p.isGuest ? 'guest' : ''}${p.disconnected ? ' · reconnecting…' : ''}</small></td><td style="color:${p.role === 'saboteur' ? 'var(--r)' : 'inherit'}">${(p.spectator || p.role === 'spectator') ? '<span class="muted">host · watching</span>' : esc(p.role || '—')}</td><td>${(p.spectator || p.role === 'spectator') ? '<span class="tag blue">WATCHING</span>' : r.gameStarted ? (p.alive ? '<span class="tag ok">ALIVE</span>' : '<span class="tag red">OUT</span>') : '—'}</td><td class="mono">${p.role === 'crewmate' ? `${p.missionsDone}/${p.missionsTotal} missions` : p.role === 'saboteur' ? `${p.killsCount} kills` : ''}</td></tr>`).join('')}</table></div></div>
+    <div class="card"><h3>ROOM STANDINGS</h3>${(r.roomLeaderboard || []).length ? r.roomLeaderboard.map((e, i) => `<div class="row" style="justify-content:space-between;padding:7px 0;border-bottom:1px solid var(--line)"><span><b style="color:${i === 0 ? 'var(--g)' : 'inherit'}">#${i + 1} ${esc(e.name || 'Player')}</b> <small class="muted">${e.present ? '' : '(left)'} · ${(e.matches || []).length} match${(e.matches || []).length === 1 ? '' : 'es'}</small></span><b style="color:var(--g)">${e.totalPoints}</b></div>`).join('') : '<div class="muted">No match finished yet.</div>'}</div></div>`;
+};
+
+/* players */
+let plQ = { page: 1, search: '', show: '' };
+R.players = async (el, first) => {
+  const d = await api(`/admin/players?page=${plQ.page}&search=${encodeURIComponent(plQ.search)}&show=${plQ.show}`);
+  const sel = param;
+  const list = `<div class="card" style="padding:8px 10px">${d.players.length ? `<div class="tbl"><table><tr><th>PLAYER</th><th>JOINED</th><th>MATCHES</th><th>POINTS</th><th>STATUS</th></tr>${d.players.map((p) => `
+    <tr class="click ${sel === p._id ? 'sel' : ''}" data-act="pl" data-id="${p._id}"><td class="who"><b>${esc(p.name || '—')}</b><small>${p.username ? '@' + esc(p.username) : ''}${p.email ? ' · ' + esc(p.email) : ''}</small></td><td class="mono">${when(p.createdAt)}</td><td>${num(p.gamesPlayed)}</td><td>${num(p.totalPoints)}</td><td>${p.accountHeld ? '<span class="tag red">ON HOLD</span>' : p.premiumUntil && new Date(p.premiumUntil) > new Date() ? '<span class="tag pass">PLAY PASS</span>' : '<span class="tag ok">ACTIVE</span>'}${p.walletResetRequestedAt && !p.walletResetApproved ? ' <span class="tag blue">RESET ASKED</span>' : ''}</td></tr>`).join('')}</table></div>` : '<div class="empty">No players match.</div>'}${pager(d.page, d.pages, (n) => { plQ.page = n; load(false); })}</div>`;
+  if (first || !$('#plSearch')) {
+    el.innerHTML = `<div class="row"><input class="in" id="plSearch" placeholder="Search name, @username, email or wallet…" value="${esc(plQ.search)}" style="max-width:420px">
+      <div class="chips">${[['', 'All'], ['pass', 'Play Pass'], ['held', 'On hold'], ['new', 'New this week'], ['walletReset', 'Wallet reset asked']].map(([k, t]) => `<button class="chip ${plQ.show === k ? 'on' : ''}" data-act="plShow" data-k="${k}">${t}</button>`).join('')}</div><span class="muted mono">${num(d.total)} found</span></div>
+      <div class="split"><div id="plList">${list}</div><div id="plDetail">${sel ? '<div class="skel"></div>' : '<div class="empty">Click a player to open their profile.</div>'}</div></div>`;
+    let t; $('#plSearch').oninput = (e) => { clearTimeout(t); t = setTimeout(() => { plQ.search = e.target.value.trim(); plQ.page = 1; load(false); }, 300); };
+  } else $('#plList').innerHTML = list;
+  if (sel) await R.playerDetail($('#plDetail'));
+};
+ACT.plShow = (b) => { plQ.show = b.dataset.k; plQ.page = 1; go('players', param); };
+ACT.pl = (r) => { param = r.dataset.id; history.replaceState(null, '', `#/players/${param}`); document.querySelectorAll('#plList tr').forEach((x) => x.classList.toggle('sel', x.dataset.id === param)); $('#plDetail').innerHTML = '<div class="skel"></div>'; R.playerDetail($('#plDetail')); if (innerWidth < 900) $('#plDetail').scrollIntoView({ behavior: 'smooth' }); };
+let plMatchPage = 1;
+R.playerDetail = async (box) => {
+  const id = param;
+  let d; try { d = await api(`/admin/players/${encodeURIComponent(id)}?matchesPage=${plMatchPage}`); } catch (e) { box.innerHTML = `<div class="err">${esc(e.message)}</div>`; return; }
+  const p = d.player; const pass = p.premiumUntil && new Date(p.premiumUntil) > new Date();
+  box.innerHTML = `<div class="card">
+    <div class="row">${pass ? `<span class="tag pass">PLAY PASS · ${esc(p.playPassSource || '')}${p.playPassPricePaidNear ? ' · ' + p.playPassPricePaidNear + ' NEAR' : ''}</span>` : ''}${p.accountHeld ? '<span class="tag red">ON HOLD</span>' : ''}${p.hasLegionBadge ? '<span class="tag blue">LEGION</span>' : ''}</div>
+    <h2 style="margin:8px 0 2px;font:700 22px var(--disp)">${esc(p.name || '—')}</h2><div class="muted mono">${p.username ? '@' + esc(p.username) + ' · ' : ''}joined ${when(p.createdAt)}</div>
+    <div class="mini"><div><b>${num(p.gamesPlayed)}</b><span>MATCHES</span></div><div><b>${p.gamesPlayed ? Math.round((p.gamesWon || 0) / p.gamesPlayed * 100) : 0}%</b><span>WIN RATE</span></div><div><b>${num(p.totalPoints)}</b><span>POINTS</span></div></div>
+    <div class="kv"><span>Email</span><b>${esc(p.email || '—')}</b><span>Game wallet</span><b>${esc(p.walletAddress || '—')}${d.walletBalanceNear != null ? ` · ${near(d.walletBalanceNear)} tNEAR` : ''}</b><span>Wallet type</span><b>${esc(p.walletType || '—')}</b><span>Paid Play Pass from</span><b>${esc(p.playPassPayerWallet || '—')}</b><span>Prize wallet</span><b>${esc(p.payoutWallet || '—')}</b>${p.accountHeld ? `<span>Hold reason</span><b>${esc(p.accountHeldReason || '—')}</b>` : ''}${p.walletResetRequestedAt ? `<span>Wallet reset</span><b>${p.walletResetApproved ? 'approved' : 'asked ' + when(p.walletResetRequestedAt)}</b>` : ''}</div>
+    ${guard(`<div class="acts">${pass ? `<button class="btn red" data-act="revoke" data-id="${p._id}">Remove Play Pass</button>` : `<button class="btn gold" data-act="gift" data-id="${p._id}">Gift Play Pass</button>`}<button class="btn" data-act="msg" data-id="${p._id}" data-n="${esc(p.name || p.username || '')}">Send message</button>${p.accountHeld ? `<button class="btn" data-act="unhold" data-id="${p._id}">Release hold</button>` : `<button class="btn red" data-act="hold" data-id="${p._id}">Put on hold</button>`}${p.walletResetRequestedAt && !p.walletResetApproved ? `<button class="btn gold" data-act="wreset" data-id="${p._id}">Approve wallet reset</button>` : ''}</div>`)}
+  </div>
+  <div class="card"><h3>MATCHES <span class="r">${num(d.matchesTotal)} total</span></h3>${d.matches.length ? `<div class="tbl"><table><tr><th>WHEN</th><th>ROLE</th><th>RESULT</th><th>PTS</th><th>ROOM</th></tr>${d.matches.map((m) => `<tr><td class="mono">${when(m.earnedAt)}</td><td style="color:${m.role === 'saboteur' ? 'var(--r)' : 'inherit'}">${esc(m.role || '—')}</td><td>${m.won ? '<span class="tag ok">WON</span>' : '<span class="tag dim">LOST</span>'}${m.poolRank ? ` <span class="tag pass">#${m.poolRank}${m.poolNearWon ? ' · ' + near(m.poolNearWon) : ''}</span>` : ''}</td><td>${num(m.points)}</td><td class="mono">${esc(m.roomCode || '')}</td></tr>`).join('')}</table></div>${pager(d.matchesPage, d.matchesPages, (n) => { plMatchPage = n; R.playerDetail(box); })}` : '<div class="muted">No matches yet.</div>'}</div>`;
+};
+ACT.gift = async (b) => {
+  const v = await ask({ title: 'Gift Play Pass', body: 'They get premium skins, GIFs, gold name and 2× $SABOTEUR, plus an Inbox message.', input: { label: 'DAYS (EMPTY = FOREVER)', placeholder: 'e.g. 30', hint: 'Leave empty for a permanent Play Pass.' }, ok: 'Gift' });
+  if (v === null) return;
+  await act(b, () => api(`/admin/players/${b.dataset.id}/grant-premium`, { json: { days: Number(v) || 0 } }), 'Play Pass gifted'); load(false);
+};
+ACT.revoke = async (b) => {
+  if (!await ask({ title: 'Remove Play Pass?', body: 'They lose premium skins and perks right away. If they paid real NEAR, this does not refund it.', ok: 'Remove', danger: true })) return;
+  await act(b, () => api(`/admin/players/${b.dataset.id}/revoke-premium`, { method: 'POST' }), 'Play Pass removed'); load(false);
+};
+ACT.hold = async (b) => {
+  const v = await ask({ title: 'Put this account on hold?', body: 'They are logged out everywhere, removed from any room, and can\'t sign in until you release them. They see the reason.', input: { label: 'REASON (SHOWN TO THEM)', placeholder: 'e.g. Cheating reports under review' }, ok: 'Put on hold', danger: true });
+  if (v === null) return;
+  await act(b, () => api(`/admin/players/${b.dataset.id}/hold`, { json: { reason: v } }), 'Account on hold'); load(false);
+};
+ACT.unhold = async (b) => { await act(b, () => api(`/admin/players/${b.dataset.id}/unhold`, { method: 'POST' }), 'Hold released'); load(false); };
+ACT.wreset = async (b) => {
+  if (!await ask({ title: 'Approve wallet reset?', body: 'They can then set up a NEW in-game wallet. Anything left in the old wallet stays there — only approve if you\'re sure it\'s really them.', ok: 'Approve' })) return;
+  await act(b, () => api(`/admin/players/${b.dataset.id}/approve-wallet-reset`, { method: 'POST' }), 'Wallet reset approved'); load(false);
+};
+ACT.msg = (b) => { STATE.msgTo = { id: b.dataset.id, name: b.dataset.n }; go('inbox'); };
+
+/* match history */
+let rmQ = { page: 1, search: '' };
+R.rooms = async (el, first) => {
+  if (param) {
+    const d = await api('/admin/rooms/' + encodeURIComponent(param));
+    const byMatch = {}; for (const m of d.matches || []) (byMatch[m.matchId] = byMatch[m.matchId] || []).push(m);
+    const ids = Object.keys(byMatch);
+    el.innerHTML = `<div><button class="btn ghost" data-act="go" data-p="rooms">‹ All rooms</button></div>${ids.length ? ids.map((mid, i) => `<div class="card"><h3>MATCH ${ids.length - i} <span class="r">${full(byMatch[mid][0].earnedAt)}</span></h3><div class="tbl"><table><tr><th>PLAYER</th><th>ROLE</th><th>RESULT</th><th>PTS</th><th>MISSIONS</th><th>KILLS</th></tr>${byMatch[mid].sort((a, b) => (a.role === 'spectator') - (b.role === 'spectator') || b.points - a.points).map((m) => m.role === 'spectator'
+      ? `<tr><td><b>${esc(m.playerName || '—')}</b> <span class="tag dim">HOST</span></td><td class="muted">watching</td><td><span class="tag blue">WATCHING</span></td><td>—</td><td>—</td><td>—</td></tr>`
+      : `<tr><td><b>${esc(m.playerName || '—')}</b></td><td style="color:${m.role === 'saboteur' ? 'var(--r)' : 'inherit'}">${esc(m.role || '—')}</td><td>${m.won ? '<span class="tag ok">WON</span>' : '<span class="tag dim">LOST</span>'}${m.survived === false ? ' <span class="tag red">OUT</span>' : ''}</td><td>${num(m.points)}</td><td>${m.role === 'crewmate' ? num(m.missionsDone) : '—'}</td><td>${m.role === 'saboteur' ? num(m.killsCount) : '—'}</td></tr>`).join('')}</table></div></div>`).join('') : '<div class="empty">No matches recorded in this room.</div>'}`;
+    return;
+  }
+  const d = await api(`/admin/rooms?page=${rmQ.page}&search=${encodeURIComponent(rmQ.search)}`);
+  const rows = `<div class="card" style="padding:8px 10px">${d.rooms.length ? `<div class="tbl"><table><tr><th>ROOM</th><th>TYPE</th><th>PLAYERS</th><th>MATCHES</th><th>LAST PLAYED</th></tr>${d.rooms.map((r) => `<tr class="click" data-act="rm" data-id="${esc(r.roomSessionId)}"><td class="mono" style="color:var(--m);font-weight:700">${esc(r.roomCode || '—')}</td><td>${r.isPoolGame ? `<span class="tag pass">${esc(r.poolName || r.gameMode || 'POOL')}</span>` : `<span class="tag dim">${esc(r.gameMode || 'free')}</span>`}</td><td>${num(r.playerCount)}</td><td>${num(r.matchCount)}</td><td class="mono">${when(r.latestAt)}</td></tr>`).join('')}</table></div>` : '<div class="empty">No rooms yet.</div>'}${pager(d.page, d.pages, (n) => { rmQ.page = n; load(false); })}</div>`;
+  if (first || !$('#rmSearch')) {
+    el.innerHTML = `<div class="row"><input class="in" id="rmSearch" placeholder="Search room code…" value="${esc(rmQ.search)}" style="max-width:300px"><span class="muted mono">${num(d.total)} room sessions</span></div><div id="rmList">${rows}</div>`;
+    let t; $('#rmSearch').oninput = (e) => { clearTimeout(t); t = setTimeout(() => { rmQ.search = e.target.value.trim(); rmQ.page = 1; load(false); }, 300); };
+  } else $('#rmList').innerHTML = rows;
+};
+ACT.rm = (r) => go('rooms', r.dataset.id);
+
+/* play pass */
+let ppQ = { status: 'needs_refund', hpage: 1, hsearch: '' };
+R.playpass = async (el, first) => {
+  refreshCounts(); // badges update in the background - never hold the page
+  const [cfg, pur, hold] = await Promise.all([api('/admin/play-pass/config'), api('/admin/play-pass/purchases' + (ppQ.status ? `?status=${ppQ.status}` : '')), api(`/admin/play-pass/holders?page=${ppQ.hpage}&search=${encodeURIComponent(ppQ.hsearch)}`)]);
+  const editing = !first && $('#ppPrice') && document.activeElement && /pp(Price|Disc|Gap)/.test(document.activeElement.id);
+  const sales = `<div class="card"><h3>REAL NEAR SALES <span class="r">${num(pur.sold)} sold · ${near(pur.revenueNear)} NEAR → ${esc(pur.receiver)}</span></h3>
+      <div class="chips" style="margin-bottom:10px">${[['needs_refund', `Refunds owed · ${pur.refundsOwed}`], ['granted', 'Sold'], ['refunded', 'Refunded'], ['', 'All']].map(([k, t]) => `<button class="chip ${ppQ.status === k ? 'on' + (k === 'needs_refund' ? ' red' : '') : ''}" data-act="ppS" data-k="${k}">${t}</button>`).join('')}</div>
+      ${pur.rows.length ? `<div class="tbl"><table><tr><th>WHEN</th><th>PLAYER</th><th>PAID FROM</th><th>NEAR</th><th>STATUS</th><th></th></tr>${pur.rows.map((r) => `<tr><td class="mono">${when(r.createdAt)}</td><td>${esc(r.playerName || '—')}</td><td class="mono">${esc(r.payerAccountId)}</td><td>${r.amountNear}</td><td>${r.status === 'needs_refund' ? `<span class="tag red">REFUND OWED</span><br><small class="muted">${esc(r.reason || '')}</small>` : r.status === 'granted' ? '<span class="tag ok">SOLD</span>' : '<span class="tag blue">REFUNDED</span>'}</td><td style="text-align:right;white-space:nowrap"><a class="mono" href="${explorer(r.txHash, true)}" target="_blank" rel="noreferrer">tx ↗</a>${r.refundTxHash ? ` · <a class="mono" href="${explorer(r.refundTxHash, true)}" target="_blank" rel="noreferrer">refund ↗</a>` : ''}${r.status === 'needs_refund' ? guard(` <button class="btn red" data-act="refunded" data-id="${r._id}" data-a="${r.amountNear}" data-to="${esc(r.payerAccountId)}">Mark refunded</button>`) : ''}</td></tr>`).join('')}</table></div>` : `<div class="empty">${ppQ.status === 'needs_refund' ? 'No refunds owed.' : 'Nothing here yet.'}</div>`}</div>`;
+  const settings = `<div class="card"><h3>PRICE & SALES</h3>
+      <div class="field"><label>PRICE · REAL NEAR (MAINNET)</label><input class="in" id="ppPrice" type="number" min="0.01" step="0.01" value="${cfg.priceNear}" ${isFull() ? '' : 'disabled'}></div>
+      <div class="field"><label>DISCOUNT %</label><input class="in" id="ppDisc" type="number" min="0" max="100" step="1" value="${cfg.discountPercent || 0}" ${isFull() ? '' : 'disabled'}><div class="hint">Players pay <b id="ppEff">${cfg.effectivePriceNear}</b> NEAR now. Raising the discount posts a News announcement.</div></div>
+      <div class="field"><label>GAMES BETWEEN SKIN UNLOCKS</label><input class="in" id="ppGap" type="number" min="1" step="1" value="${cfg.unlockGamesGap || 2}" ${isFull() ? '' : 'disabled'}><div class="hint">The first skin unlocks right away; each next one after this many games.</div></div>
+      <div class="toggle ${cfg.enabled ? 'on' : ''}" id="ppEn" ${isFull() ? 'data-act="ppEn"' : ''} style="margin:4px 0 14px"><div class="sw"></div><b style="font-weight:600">${cfg.enabled ? 'Sales are ON' : 'Sales are OFF'}</b></div>
+      ${guard('<button class="btn solid" data-act="ppSave">Save settings</button>')}</div>`;
+  const holders = `<div class="card"><h3>HOLDERS <span class="r">${num(hold.total)}</span></h3><div class="row" style="margin-bottom:10px"><input class="in" id="ppHS" placeholder="Search holders…" value="${esc(ppQ.hsearch)}" style="max-width:300px">${guard('<button class="btn gold" data-act="ppGiftFind">Gift to a player…</button>')}</div>
+      ${hold.holders.length ? `<div class="tbl"><table><tr><th>PLAYER</th><th>HOW</th><th>UNTIL</th><th></th></tr>${hold.holders.map((h) => `<tr><td class="who"><b>${esc(h.name || '—')}</b><small>${h.username ? '@' + esc(h.username) : esc(h.email || '')}</small></td><td><span class="tag ${h.source === 'purchased' ? 'pass' : 'blue'}">${esc((h.source || '').toUpperCase())}</span></td><td class="mono">${h.isPermanent ? 'forever' : full(h.premiumUntil)}</td><td style="text-align:right">${guard(`<button class="btn red" data-act="revoke2" data-id="${h.id}">Remove</button>`)}</td></tr>`).join('')}</table></div>` : '<div class="empty">No holders match.</div>'}${pager(hold.page, hold.totalPages, (n) => { ppQ.hpage = n; load(false); })}</div>`;
+  if (first || !$('#ppSales')) {
+    el.innerHTML = `<div class="grid2"><div id="ppSales">${sales}</div><div id="ppSet">${settings}</div></div><div id="ppHold">${holders}</div>`;
+  } else { $('#ppSales').innerHTML = sales; if (!editing) $('#ppSet').innerHTML = settings; if (document.activeElement?.id !== 'ppHS') $('#ppHold').innerHTML = holders; }
+  const hs = $('#ppHS'); if (hs && !hs.dataset.bound) { hs.dataset.bound = 1; let t; hs.oninput = (e) => { clearTimeout(t); t = setTimeout(() => { ppQ.hsearch = e.target.value.trim(); ppQ.hpage = 1; load(false); }, 300); }; }
+  const upd = () => { const p = Number($('#ppPrice')?.value) || 0, d = Number($('#ppDisc')?.value) || 0; if ($('#ppEff')) $('#ppEff').textContent = +(p * (1 - d / 100)).toFixed(4); };
+  ['#ppPrice', '#ppDisc'].forEach((s) => { const x = $(s); if (x) x.oninput = upd; });
+};
+ACT.ppS = (b) => { ppQ.status = b.dataset.k; load(false); };
+ACT.ppEn = (t) => { t.classList.toggle('on'); t.querySelector('b').textContent = t.classList.contains('on') ? 'Sales are ON' : 'Sales are OFF'; };
+ACT.ppSave = async (b) => {
+  const body = { priceNear: Number($('#ppPrice').value), discountPercent: Number($('#ppDisc').value) || 0, unlockGamesGap: Math.max(1, Number($('#ppGap').value) || 2), enabled: $('#ppEn').classList.contains('on') };
+  if (!(body.priceNear > 0)) return toast('Price must be more than 0.', true);
+  if (!await ask({ title: 'Save Play Pass settings?', body: `Price <b>${body.priceNear} NEAR</b>${body.discountPercent ? `, ${body.discountPercent}% off → players pay <b>${+(body.priceNear * (1 - body.discountPercent / 100)).toFixed(4)} NEAR</b>` : ''}. Sales ${body.enabled ? 'ON' : 'OFF'}. Applies to the next purchase.`, ok: 'Save' })) return;
+  await act(b, () => api('/admin/play-pass/config', { json: body }), 'Saved'); load(true);
+};
+ACT.refunded = async (b) => {
+  const v = await ask({ title: 'Mark as refunded', body: `First send <b>${esc(b.dataset.a)} NEAR</b> from saboteur.near to <b>${esc(b.dataset.to)}</b> in your wallet. Then paste that transaction hash here — the player gets an Inbox message.`, input: { label: 'REFUND TRANSACTION HASH', placeholder: 'e.g. 9YB1Qq…' }, ok: 'Mark refunded' });
+  if (v === null) return;
+  await act(b, () => api(`/admin/play-pass/purchases/${b.dataset.id}/refunded`, { json: { refundTxHash: v.trim() } }), 'Marked refunded'); load(false);
+};
+ACT.revoke2 = async (b) => { if (!await ask({ title: 'Remove Play Pass?', body: 'They lose the perks right away. This does not refund real NEAR.', ok: 'Remove', danger: true })) return; await act(b, () => api(`/admin/players/${b.dataset.id}/revoke-premium`, { method: 'POST' }), 'Removed'); load(false); };
+ACT.ppGiftFind = async () => {
+  const q = await ask({ title: 'Gift Play Pass to…', input: { label: 'PLAYER NAME, @USERNAME OR EMAIL', placeholder: 'Search' }, ok: 'Find' });
+  if (!q) return;
+  const d = await api(`/admin/players?search=${encodeURIComponent(q.trim())}`).catch((e) => { toast(e.message, true); return null; });
+  if (!d) return; if (!d.players.length) return toast('No player found.', true);
+  param = d.players[0]._id; go('players', param); toast(d.players.length > 1 ? `Opened the first of ${d.players.length} matches` : 'Player opened — use Gift Play Pass');
+};
+
+/* pools */
+let poQ = { tab: 'pools', filter: '', page: 1, tpage: 1, ttype: '', tsearch: '', legacy: 1 };
+R.pools = async (el, first) => {
+  refreshCounts(); // badges update in the background - never hold the page
+  const tabs = `<div class="chips">${[['pools', 'Pools'], ['tx', 'Transactions'], ['legacy', 'Older pools'], ['chain', 'On-chain check']].map(([k, t]) => `<button class="chip ${poQ.tab === k ? 'on' : ''}" data-act="poT" data-k="${k}">${t}</button>`).join('')}</div>`;
+  if (poQ.tab === 'tx') {
+    const types = [['', 'All'], ['participate', 'Entries'], ['distribute_prizes', 'Prizes'], ['platform_fee', 'Fees'], ['refund_participant', 'Refunds'], ['cancel_pool', 'Cancelled'], ['create_pool', 'Created'], ['lock_participation', 'Started']];
+    const d = await api(`/admin/transactions?page=${poQ.tpage}&type=${poQ.ttype}&search=${encodeURIComponent(poQ.tsearch)}`);
+    const rows = d.rows.length ? `<div class="card" style="padding:8px 10px"><div class="tbl"><table><tr><th>WHEN</th><th>WHAT</th><th>WHO</th><th>NEAR</th><th>POOL</th><th></th></tr>${d.rows.map((r) => `<tr><td class="mono">${when(r.createdAt)}</td><td>${esc((r.type || '').replace(/_/g, ' '))}${r.stuck ? ' <span class="tag red">STUCK</span>' : ''}${r.outcome ? ` <span class="tag dim">${esc(r.outcome)}</span>` : ''}</td><td>${esc(r.playerName || r.accountId || '—')}</td><td>${r.amountNear ? near(r.amountNear) : '—'}</td><td class="mono">#${esc(r.onChainPoolId)} · ${esc(r.roomCode || '')}</td><td style="text-align:right">${r.txHash ? `<a class="mono" href="${explorer(r.txHash)}" target="_blank" rel="noreferrer">tx ↗</a>` : ''}</td></tr>`).join('')}</table></div>${pager(d.page, d.pages, (n) => { poQ.tpage = n; load(false); })}</div>` : '<div class="empty">No transactions match.</div>';
+    if (first || !$('#txS')) { el.innerHTML = `${tabs}<div class="row"><input class="in" id="txS" placeholder="Search player or room…" value="${esc(poQ.tsearch)}" style="max-width:300px"><div class="chips">${types.map(([k, t]) => `<button class="chip ${poQ.ttype === k ? 'on' : ''}" data-act="txT" data-k="${k}">${t}</button>`).join('')}</div></div><div id="txL">${rows}</div>`; let t; $('#txS').oninput = (e) => { clearTimeout(t); t = setTimeout(() => { poQ.tsearch = e.target.value.trim(); poQ.tpage = 1; load(false); }, 300); }; }
+    else $('#txL').innerHTML = rows;
+    return;
+  }
+  if (poQ.tab === 'chain') {
+    // The scan reads every pool from the contract (slow), so auto-refresh
+    // re-uses the last result instead of rescanning; Rescan / Resolve do a fresh one.
+    const intro = `<div class="row" style="justify-content:space-between;margin:0 0 10px"><p class="muted" style="margin:0">Reads every pool straight from the contract and lists the ones still holding test NEAR with no live room — including old pools from before tracking existed.</p><button class="btn ghost" data-act="chScan">Rescan</button></div>`;
+    const table = (d) => {
+      const total = d.pools.reduce((a, p) => a + p.totalNear, 0);
+      return d.pools.length ? `<div class="card" style="padding:8px 10px"><div style="margin-bottom:8px"><b style="color:var(--g)">${d.pools.length} pool${d.pools.length === 1 ? '' : 's'} · ${Math.round(total * 1000) / 1000} tNEAR</b> <small class="muted">still held in the contract</small></div><div class="tbl"><table><tr><th>POOL</th><th>STATE</th><th>TYPE</th><th>NEAR</th><th>PLAYERS</th><th>WHAT RESOLVE DOES</th><th></th></tr>${d.pools.map((p) => `<tr><td class="mono">#${esc(p.onChainPoolId)} ${esc(p.name || '')}</td><td>${esc(p.state)}${p.tracked ? '' : ' <span class="tag dim">untracked</span>'}</td><td>${p.hostFunded ? 'Pool' : 'Paid'}</td><td>${near(p.totalNear)}</td><td>${p.participants.length}</td><td class="muted" style="font-size:12px">${esc(p.action)}</td><td style="text-align:right">${guard(`<button class="btn red" data-act="chRes" data-p="${esc(p.onChainPoolId)}" data-w="${esc(p.action)}">Resolve</button>`)}</td></tr>`).join('')}</table></div></div>` : '<div class="empty">Nothing stuck in the contract. 🎉</div>';
+    };
+    if (!first && poQ.chainData) { el.innerHTML = tabs + intro + table(poQ.chainData); return; }
+    el.innerHTML = `${tabs}${intro}<div class="empty chL">Scanning the contract… (takes a few seconds)</div>`;
+    const box = el.querySelector('.chL');
+    const d = await api(`/admin/pools/chain-orphans${poQ.chainFresh ? '?fresh=1' : ''}`);
+    poQ.chainFresh = false;
+    poQ.chainData = d;
+    if (!box || !box.isConnected || poQ.tab !== 'chain') return; // the admin moved on meanwhile
+    box.outerHTML = table(d);
+    return;
+  }
+  if (poQ.tab === 'legacy') {
+    const d = await api(`/admin/funds/legacy-history?page=${poQ.legacy}`);
+    el.innerHTML = `${tabs}<p class="muted" style="margin:0">Pools from before money tracking existed, rebuilt from match history.</p>${d.pools.length ? d.pools.map((p) => `<div class="item"><div class="t">${esc(p.poolName || 'Pool game')} <small>· room ${esc(p.roomCode || '—')} · ${new Date(p.earliestAt).toLocaleDateString()}</small></div>${p.participants.map((x) => `<div class="row" style="justify-content:space-between;font-size:12.5px;padding:3px 0"><span>${esc(x.playerName || '—')} ${x.poolRank ? `<span class="tag pass">#${x.poolRank}</span>` : ''}</span><span class="mono">${x.entryFeeNear != null ? 'paid ' + x.entryFeeNear : ''}${x.poolNearWon ? ' · won ' + near(x.poolNearWon) : ''}</span></div>`).join('')}</div>`).join('') + pager(d.page, d.pages, (n) => { poQ.legacy = n; load(false); }) : '<div class="empty">No older pools.</div>'}`;
+    return;
+  }
+  const d = await api(`/admin/funds?page=${poQ.page}&filter=${poQ.filter}`);
+  el.innerHTML = `${tabs}<div class="chips">${[['', 'All pools'], ['attention', `Needs attention · ${d.needsAttentionCount}`]].map(([k, t]) => `<button class="chip ${poQ.filter === k ? 'on' + (k ? ' red' : '') : ''}" data-act="poF" data-k="${k}">${t}</button>`).join('')}</div>
+    ${d.records.length ? d.records.map((p) => `<div class="item ${p.attention ? 'bad' : ''}">
+      <div class="row" style="justify-content:space-between"><span class="row"><b class="mono" style="color:var(--m)">#${esc(p.onChainPoolId)}</b><span class="tag dim">${esc(p.roomCode || '—')}</span><span class="tag ${p.hostFunded ? 'blue' : 'pass'}">${p.hostFunded ? 'POOL' : 'PAID'}</span><span class="tag ${p.state === 'Distributed' ? 'ok' : p.state === 'Refunded' ? 'blue' : 'dim'}">${esc((p.state || '').toUpperCase())}</span>${p.attention ? '<span class="tag red">NEEDS ATTENTION</span>' : ''}</span><small>${new Date(p.createdAt).toLocaleDateString()}</small></div>
+      <div class="muted" style="font-size:12.5px;margin-top:6px">${p.entryFeeNear} tNEAR ${p.hostFunded ? 'prize' : 'per player'} · ${p.matchesPlayed}/${p.maxMatches} matches · host ${esc(p.hostName || '—')} · ${p.participantCount} player${p.participantCount === 1 ? '' : 's'}${p.settledAt ? ` · settled ${new Date(p.settledAt).toLocaleDateString()}` : ''}</div>
+      ${p.stuckAmountNear != null ? `<div style="margin-top:6px;color:var(--g);font-weight:600">${p.stuckAmountNear} tNEAR not settled yet — belongs to ${p.moneyBelongsTo.map(esc).join(', ')}</div>` : ''}
+      ${p.lastSettlementError && !p.selfResolvedAfterError ? `<div style="margin-top:6px;color:#ffb3bc;font-size:12.5px">Last try #${p.settlementAttempts}: ${esc(p.lastSettlementErrorExplained || p.lastSettlementError)}</div>` : ''}
+      ${(p.stuckReports || []).filter((r) => !r.resolved).map((r) => `<div class="row" style="margin-top:8px;font-size:12.5px"><span>🙋 <b>${esc(r.playerName || r.accountId)}</b> reported a stuck payment ${when(r.reportedAt)}</span>${guard(`${p.canRefundSingleParticipant ? `<button class="btn red" data-act="poRefund" data-p="${esc(p.onChainPoolId)}" data-a="${esc(r.accountId)}">Refund this player</button>` : ''}<button class="btn ghost" data-act="poResolve" data-p="${esc(p.onChainPoolId)}" data-a="${esc(r.accountId)}">Mark resolved</button>`)}</div>`).join('')}
+      ${p.attention ? guard(`<div style="margin-top:10px"><button class="btn red" data-act="poRetry" data-p="${esc(p.onChainPoolId)}">Resolve now</button> <small class="muted">pays out if a match finished, otherwise refunds</small></div>`) : ''}
+    </div>`).join('') + pager(d.page, d.pages, (n) => { poQ.page = n; load(false); }) : `<div class="empty">${poQ.filter ? 'Nothing needs attention. 🎉' : 'No pools yet.'}</div>`}`;
+};
+ACT.poT = (b) => { poQ.tab = b.dataset.k; load(true); };
+ACT.chScan = () => { poQ.chainData = null; poQ.chainFresh = true; load(true); };
+ACT.chRes = async (b) => {
+  if (!await ask({ title: `Resolve pool #${b.dataset.p}?`, body: `This will <b>${esc(b.dataset.w)}</b>. Money only ever goes back to the people who paid it in, or to that pool's winners.`, ok: 'Resolve', danger: true })) return;
+  const r = await act(b, () => api(`/admin/pools/chain-orphans/${b.dataset.p}/resolve`, { method: 'POST' }));
+  poQ.chainData = null; // rescan to show the new state
+  if (r && r.result) toast(r.result.skipped ? `Not resolved: ${r.result.reason}` : `Done: ${r.result.action}${r.result.outcome && r.result.outcome.success ? ' ✓' : ' — failed: ' + ((r.result.outcome && r.result.outcome.error) || '')}`, !(r.result.outcome && r.result.outcome.success));
+  load(false);
+};
+ACT.poF = (b) => { poQ.filter = b.dataset.k; poQ.page = 1; load(true); };
+ACT.txT = (b) => { poQ.ttype = b.dataset.k; poQ.tpage = 1; load(true); };
+ACT.poRetry = async (b) => {
+  if (!await ask({ title: `Resolve pool #${b.dataset.p}?`, body: 'The server retries the right on-chain action: pay out the winners if at least one match finished, otherwise refund everyone.', ok: 'Resolve now' })) return;
+  const r = await act(b, () => api(`/admin/funds/${b.dataset.p}/retry`, { method: 'POST' }));
+  if (r && r.result) toast(r.result.skipped ? `Not resolved: ${r.result.reason}` : `Done: ${r.result.action}${r.result.outcome && r.result.outcome.success ? ' ✓' : ' — check the pool'}`, !!r.result.skipped);
+  load(false);
+};
+ACT.poRefund = async (b) => { if (!await ask({ title: 'Refund this one player?', body: `Sends <b>${esc(b.dataset.a)}</b> their entry fee back from pool #${esc(b.dataset.p)}. Everyone else stays in.`, ok: 'Refund', danger: true })) return; await act(b, () => api(`/admin/funds/${b.dataset.p}/refund-participant`, { json: { accountId: b.dataset.a } }), 'Refunded'); load(false); };
+ACT.poResolve = async (b) => { const v = await ask({ title: 'Mark resolved (no refund)?', input: { label: 'NOTE (OPTIONAL)', placeholder: 'Why no refund is needed' }, ok: 'Mark resolved' }); if (v === null) return; await act(b, () => api(`/admin/funds/${b.dataset.p}/resolve-stuck-report`, { json: { accountId: b.dataset.a, note: v } }), 'Resolved'); load(false); };
+
+/* wallets */
+/* ============ weekly rewards (NEAR Intents agent) ============ */
+// saboteur.near signs owner actions right here with its own wallet (HOT /
+// Meteor / Intear / Ledger via NEAR Connect, served from this server). The
+// server only prepares and submits them; it never sees the wallet's key.
+const WA = { conn: null, wallet: null, account: null, d: null };
+const mmss = (ms) => { const s = Math.max(0, Math.round(ms / 1000)); return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`; };
+setInterval(() => document.querySelectorAll('[data-cd]').forEach((e) => { e.textContent = mmss(new Date(e.dataset.cd) - Date.now()); }), 1000);
+const shortId = (s) => (s && s.length > 14 ? `${s.slice(0, 8)}…${s.slice(-4)}` : s || '—');
+const inTime = (d) => { const ms = new Date(d) - Date.now(); if (ms <= 0) return 'now'; const h = Math.floor(ms / 3600e3), dd = Math.floor(h / 24); return dd ? `in ${dd}d ${h % 24}h` : `in ${h}h ${Math.floor((ms % 3600e3) / 60e3)}m`; };
+async function waConnector() {
+  if (WA.conn) return WA.conn;
+  const { NearConnector } = await import('/vendor/near-connect-0.12.0.js');
+  WA.conn = new NearConnector({ network: 'mainnet', features: { signDelegateActions: true }, footerBranding: null });
+  WA.conn.on('wallet:signOut', () => { WA.wallet = null; WA.account = null; load(false); });
+  await WA.conn.whenManifestLoaded;
+  try { WA.wallet = await WA.conn.wallet(); const a = await WA.wallet.getAccounts(); WA.account = a && a[0] ? a[0] : null; } catch { WA.wallet = null; }
+  return WA.conn;
+}
+ACT.waConnect = async (b) => {
+  await act(b, async () => {
+    const c = await waConnector();
+    if (WA.wallet && WA.account && WA.account.accountId !== WA.d.owner) { await c.disconnect().catch(() => {}); WA.wallet = null; WA.account = null; }
+    if (!WA.wallet) { await c.connect(); WA.wallet = await c.wallet(); const a = await WA.wallet.getAccounts(); WA.account = a && a[0] ? a[0] : null; }
+    if (!WA.account || WA.account.accountId !== WA.d.owner) throw new Error(`Connected ${WA.account ? WA.account.accountId : 'nothing'}. Connect ${WA.d.owner} instead.`);
+  }, `${WA.d.owner} connected`);
+  load(false);
+};
+ACT.waDisconnect = async (b) => { await act(b, async () => { const c = await waConnector(); await c.disconnect(); WA.wallet = null; WA.account = null; }); load(false); };
+const waConnected = () => !!(WA.wallet && WA.account && WA.d && WA.account.accountId === WA.d.owner);
+const WA_WHAT = {
+  create: { t: 'Create the agent', b: 'saboteur.near becomes the owner of a new agent account on NEAR Intents and signs its rules once. Gasless.' },
+  grant: { t: 'Allow the game', b: 'Gives the game server permission to ask for payouts, valid for one year. It can only act inside the rules saboteur.near signed.' },
+  rules: { t: 'Change rules', b: 'Signs fresh payout rules that fit the current prize: withdraw NEAR only, a weekly $ cap and a per-payment cap.' },
+  withdraw_mode: { t: 'Withdraw to saboteur.near', b: 'Switches the agent to "send only to saboteur.near" and then sends everything there. Weekly payouts pause until you sign "Resume payouts".' },
+  freeze: { t: 'Freeze the agent', b: 'Stops every outgoing payment at NEAR Intents until you unfreeze it.' },
+  unfreeze: { t: 'Unfreeze the agent', b: 'Lets the agent pay again inside its rules.' },
+};
+async function waSign(kind, btn, extra = {}) {
+  if (!waConnected()) { toast(`Connect ${WA.d.owner} first (button at the top).`, true); return null; }
+  const w = WA_WHAT[kind];
+  const g = await act(btn, () => api('/admin/weekly-agent/intent', { json: { kind, publicKey: WA.account.publicKey || null, ...extra } }));
+  if (!g) return null;
+  const pol = g.policy ? `<div class="kv" style="margin-top:10px"><span>Can do</span><b>${esc((g.policy.actions || []).join(', '))}</b><span>Assets</span><b>${esc(Array.isArray(g.policy.assets) ? g.policy.assets.join(', ') : g.policy.assets)}</b><span>Weekly cap</span><b>${g.policy.budget && g.policy.budget.weekly_usd ? '$' + esc(g.policy.budget.weekly_usd) : 'none'}</b><span>Sends to</span><b>${esc(g.policy.destinations && g.policy.destinations.mode === 'only' ? g.policy.destinations.list.map((x) => x.address).join(', ') + ' only' : 'any winner wallet')}</b></div>` : '';
+  const depYocto = g.intent && g.intent.standard === 'nep366' ? (g.intent.payload.actions || []).reduce((a, x) => a + BigInt((x.params && x.params.deposit) || 0), 0n) : 0n;
+  const depTxt = depYocto > 0n ? `${esc(WA.account.accountId)} pays <b>${(Number(depYocto / 10n ** 18n) / 1e6).toFixed(4)} NEAR</b> storage deposit (gas is sponsored). ` : 'No NEAR is spent. ';
+  const okGo = await ask({ title: w.t + ' · sign', body: `${esc(w.b)}<div class="item" style="margin-top:10px"><p style="margin:0">${esc(g.summary)}</p></div>${pol}<p class="muted" style="font-size:12px;margin:10px 0 0">${depTxt}Your wallet (${esc(WA.account.accountId)}) opens next. Signing request expires ${esc(when(g.expiresAt).replace(' ago', ''))}.</p>`, ok: 'Sign with wallet' });
+  if (!okGo) return null;
+  const intent = g.intent;
+  let signedData;
+  try {
+    if (intent.standard === 'nep366') {
+      const r = await WA.wallet.signDelegateActions({ signerId: WA.d.owner, delegateActions: [intent.payload] });
+      const sd = r && r.signedDelegateActions && r.signedDelegateActions[0];
+      if (!sd) throw new Error('The wallet returned no signature.');
+      signedData = { standard: intent.standard, payload: intent.payload, signed_delegate: typeof sd === 'string' ? sd : sd.signedDelegate || sd };
+    } else if (intent.standard === 'nep413') {
+      const nonce = Uint8Array.from(atob(intent.payload.nonce), (c) => c.charCodeAt(0));
+      const r = await WA.wallet.signMessage({ message: intent.payload.message, recipient: intent.payload.recipient, nonce, signerId: WA.d.owner });
+      signedData = { standard: intent.standard, payload: intent.payload, public_key: r.publicKey, signature: r.signature };
+    } else throw new Error('This wallet type (' + intent.standard + ') is not supported here.');
+  } catch (e) { toast('Not signed: ' + (e.message || e), true); return null; }
+  toast('Signed. Waiting for NEAR Intents to confirm…');
+  const r = await act(null, () => api('/admin/weekly-agent/submit', { json: { correlationId: g.correlationId, signedData } }));
+  if (r) toast(r.status === 'SUCCESS' ? `${w.t}: done` : r.status === 'PROCESSING' ? `${w.t}: still confirming, this page updates by itself` : `${w.t}: ${r.status} ${r.failure || ''}`, !['SUCCESS', 'PROCESSING'].includes(r.status));
+  load(false);
+  return r;
+}
+ACT.waCreate = async (b) => {
+  const d = WA.d;
+  const ok = await ask({ title: 'Before you create the agent', body: `<p style="margin:0 0 10px">${esc(d.riskNotice)}</p><p style="margin:0 0 10px">Read and accept: <a href="${esc(d.ownerTermsUrl)}" target="_blank" rel="noopener">Owner Terms ↗</a> · <a href="${esc(d.outlayerTermsUrl)}" target="_blank" rel="noopener">OutLayer terms ↗</a></p><p class="muted" style="margin:0;font-size:12px">Clicking "I accept" records that ${esc(d.owner)} accepted them (time is saved).</p>`, ok: 'I accept' });
+  if (!ok) return;
+  await waSign('create', b, { termsAccepted: true });
+};
+ACT.waGrant = (b) => waSign('grant', b);
+ACT.waRules = (b) => waSign('rules', b);
+ACT.waFreeze = async (b) => { if (await ask({ title: 'Freeze the agent?', body: 'No payment can leave it until you unfreeze (one more signature). Unfreezing may have a short cooldown.', ok: 'Continue', danger: true })) waSign('freeze', b); };
+ACT.waUnfreeze = (b) => waSign('unfreeze', b);
+ACT.waWithdraw = async (b) => {
+  const d = WA.d;
+  if (d.mode === 'withdraw_to_owner') {
+    if (!await ask({ title: `Send everything to ${d.owner}?`, body: `About <b>${num(d.balanceNear, 4)} NEAR</b> goes to ${esc(d.owner)}.`, ok: 'Send' })) return;
+    await act(b, () => api('/admin/weekly-agent/withdraw-all', { method: 'POST' }), 'Withdrawal started'); load(false); return;
+  }
+  if (!await ask({ title: `Withdraw to ${d.owner}`, body: esc(WA_WHAT.withdraw_mode.b) + '<p class="muted" style="font-size:12px;margin:10px 0 0">Step 1: sign. Step 2: the server sends the full balance to ' + esc(d.owner) + ' automatically.</p>', ok: 'Continue' })) return;
+  const r = await waSign('withdraw_mode', b);
+  if (r && r.status === 'SUCCESS') { await act(null, () => api('/admin/weekly-agent/withdraw-all', { method: 'POST' }), 'Withdrawal started'); load(false); }
+};
+ACT.waFund = async (b) => {
+  const d = WA.d;
+  const dep = await act(b, () => api('/admin/weekly-agent/deposit', { method: 'POST' }));
+  if (!dep) return;
+  const canSend = waConnected();
+  const v = await ask({ title: 'Add funds to the agent', body: `<p style="margin:0 0 10px">${esc(d.riskNotice)}</p>
+    <div class="field"><label>DEPOSIT ADDRESS (NEAR MAINNET)</label><div class="item mono" style="word-break:break-all;margin:0">${esc(dep.address)}</div>${dep.memo ? `<div class="hint">Memo: <b>${esc(dep.memo)}</b> (required)</div>` : ''}</div>
+    <p class="muted" style="font-size:12px;margin:0 0 10px">Send NEAR to this address from any wallet${dep.minAmount ? ` (at least ${esc(num(Number(dep.minAmount) / 1e24, 4))} NEAR)` : ''}. It shows in the agent balance in a minute or two. Address valid until ${esc(full(dep.expiresAt))}. Try a small amount first.</p>
+    <button class="btn ghost" type="button" onclick="navigator.clipboard.writeText('${esc(dep.address)}')">Copy address</button>`,
+    ok: canSend ? `Send from ${d.owner}` : false, cancel: 'Close', input: canSend ? { label: 'OR SEND NOW FROM THE CONNECTED WALLET (NEAR)', placeholder: 'e.g. 3', value: '' } : undefined });
+  if (!v || !canSend) return;
+  const amt = Number(v);
+  if (!(amt > 0 && amt <= 1000)) { toast('Enter an amount in NEAR.', true); return; }
+  const yocto = (BigInt(Math.round(amt * 1e6)) * 10n ** 18n).toString();
+  await act(null, () => WA.wallet.signAndSendTransaction({ receiverId: dep.address, actions: [{ type: 'Transfer', params: { deposit: yocto } }] }), `Sent ${amt} NEAR. It shows in the balance in a minute or two.`);
+};
+ACT.waToggle = async (t) => {
+  const d = WA.d;
+  if (!d.enabled || d.stopAfterWeekEnd) { await act(null, () => api('/admin/weekly-agent/settings', { json: { enabled: true } }), 'Weekly rewards are ON'); load(false); return; }
+  const m = $('#modal'), box = $('#mbox');
+  box.innerHTML = `<h2>Switch weekly rewards off?</h2><div class="body">The prize banner disappears from Ranks right away. Remaining NEAR stays in the agent until you withdraw it.</div>
+    <div class="acts" style="flex-direction:column;align-items:stretch"><button class="btn gold" id="waOffA">Pay this week, then stop</button><button class="btn red" id="waOffB">Stop now${d.current && d.current.status === 'countdown' ? ' (also cancels the countdown)' : ''}</button><button class="btn ghost" id="waOffC">Keep it on</button></div>`;
+  m.classList.remove('hidden');
+  const close = () => { m.classList.add('hidden'); box.innerHTML = ''; };
+  const pick = async (offMode) => { close(); await act(null, () => api('/admin/weekly-agent/settings', { json: { enabled: false, offMode } }), offMode === 'now' ? 'Stopped' : 'Pays this week, then stops'); load(false); };
+  $('#waOffA').onclick = () => pick('after_this_week'); $('#waOffB').onclick = () => pick('now'); $('#waOffC').onclick = close;
+  m.onclick = (e) => { if (e.target === m) close(); };
+};
+ACT.waPrize = async (b) => {
+  const v = Number($('#waPrize').value);
+  if (!(v >= 1 && v <= 10000)) { toast('Prize must be between $1 and $10,000.', true); return; }
+  await act(b, () => api('/admin/weekly-agent/settings', { json: { prizeUsd: v } }), `Prize set to $${v}`);
+  load(false);
+};
+ACT.waSendNow = async (b) => { if (!await ask({ title: 'Send all 3 prizes now?', body: 'Skips the rest of the 30-minute timer. All winners with a wallet are paid together.', ok: 'Send now' })) return; await act(b, () => api(`/admin/weekly-agent/batch/${b.dataset.id}/send-now`, { method: 'POST' }), 'Sending…'); setTimeout(() => load(false), 2500); };
+ACT.waCancel = async (b) => { if (!await ask({ title: 'Cancel this week?', body: 'Nobody is paid for this week. Each winner gets a short Inbox note. This can\'t be undone.', ok: 'Cancel this week', danger: true, cancel: 'Keep it' })) return; await act(b, () => api(`/admin/weekly-agent/batch/${b.dataset.id}/cancel`, { method: 'POST' }), 'This week was cancelled'); load(false); };
+ACT.waRetry = async (b) => { await act(b, () => api(`/admin/weekly-agent/batch/${b.dataset.id}/retry`, { json: { rank: Number(b.dataset.r) } }), 'Retrying…'); setTimeout(() => load(false), 2500); };
+
+R.weekly = async (el) => {
+  const d = await api('/admin/weekly-agent');
+  WA.d = d;
+  if (!WA.conn) waConnector().then(() => { if (current === 'weekly' && WA.wallet) load(false); }).catch(() => {});
+  const F = isFull();
+  const price = d.nearPrice;
+  const totalNear = price ? d.prizeUsd / price : null;
+  const on = d.enabled && !d.stopAfterWeekEnd;
+  const wallet = waConnected()
+    ? `<span class="tag ok">✓ ${esc(WA.account.accountId)}</span>${F ? ` <button class="btn ghost" data-act="waDisconnect">Disconnect</button>` : ''}`
+    : (F ? `<button class="btn gold" data-act="waConnect">Connect ${esc(d.owner)}</button>` : '');
+  const head = `<div class="wa-ph"><div class="row">${wallet}</div><div class="r">${F && d.ready ? `<button class="toggle ${on ? 'on' : ''}" data-act="waToggle"><span class="sw"></span><b>${on ? 'ON' : d.stopAfterWeekEnd ? 'STOPS AFTER THIS WEEK' : 'OFF'}</b></button>` : ''}</div></div>`;
+  const warns = [];
+  if (!d.apiKeySet) warns.push('NEAR_INTENTS_AGENT_API_KEY is not set on this server. Add it in Render → Environment.');
+  if (d.agentError) warns.push('NEAR Intents: ' + d.agentError);
+  if (d.grantUnreadable) warns.push('The game\'s saved permission can\'t be read anymore (the server secret changed). Sign "Allow the game" again in the setup below.');
+  if (d.pending && d.pending.status === 'PROCESSING') warns.push(`Waiting for NEAR Intents to confirm "${(WA_WHAT[d.pending.kind] || {}).t || d.pending.kind}"…`);
+  if (d.pending && d.pending.error) warns.push(`Last signature (${(WA_WHAT[d.pending.kind] || {}).t || d.pending.kind}) failed: ${d.pending.error}`);
+  if (d.needsRulesUpdate) warns.push(`The agent's caps are too low for a $${d.prizeUsd} prize. Click "Change rules (sign)".`);
+  if (d.policy && d.policy.frozen) warns.push('The agent is FROZEN: no prize can be sent until you unfreeze it.');
+  if (d.mode === 'withdraw_to_owner') warns.push(`The agent is in withdraw-to-${d.owner} mode: weekly payouts are paused. Sign "Resume payouts" to start again.`);
+  if (d.ready && price && d.balanceNear != null && d.balanceNear < totalNear) warns.push(`The agent holds ${num(d.balanceNear, 3)} NEAR but this week's prize needs about ${num(totalNear, 3)} NEAR. Add funds.`);
+  const warnHtml = warns.map((w) => `<div class="wa-warn">${esc(w)}</div>`).join('');
+
+  // first-time setup
+  const step = (n, title, body, done, btn) => `<div class="wa-step ${done ? 'done' : ''}"><b>${done ? '✓' : n} · ${title}</b>${body}${!done && btn ? `<div style="margin-top:8px">${btn}</div>` : ''}</div>`;
+  const setup = !d.ready && d.mode !== 'withdraw_to_owner' ? `<div class="card wa-c12"><h3>FIRST-TIME SETUP</h3>
+    <div class="wa-steps">
+      ${step(1, 'Create the agent', `Sign once with ${esc(d.owner)} (HOT / Meteor / Intear). Gas is sponsored; ${esc(d.owner)} only pays a tiny storage deposit (about 0.015 NEAR). The rules are below.`, !!d.agentId, F ? `<button class="btn solid" data-act="waCreate" ${waConnected() ? '' : 'disabled'}>Sign · create agent</button>` : '')}
+      ${step(2, 'Allow the game', 'Sign once more: a permission (grant) for the game server to ask for payouts — only inside those rules.', d.hasGrant, F && d.agentId ? `<button class="btn solid" data-act="waGrant" ${waConnected() ? '' : 'disabled'}>Sign · allow the game</button>` : '')}
+      ${step(3, 'Fund it', "Send NEAR to the agent's deposit address from any wallet. 2–3 weeks of prizes is plenty.", d.balanceNear > 0, F && d.agentId ? `<button class="btn gold" data-act="waFund">＋ Get deposit address</button>` : '')}
+    </div>
+    ${waConnected() || !F ? '' : `<p class="muted" style="font-size:12px;margin:10px 0 0">Connect ${esc(d.owner)} first (button at the top).</p>`}
+    <div class="wa-warn" style="margin-top:12px">NEAR Intents Agent API is an experimental beta on mainnet. Keep only a few weeks of prizes in the agent; you can freeze it and withdraw the rest to ${esc(d.owner)} at any time.</div></div>` : '';
+
+  const prizeCard = `<div class="card wa-c4"><h3>THIS WEEK'S PRIZE</h3>
+    <div class="wa-in">$ <input id="waPrize" type="number" min="1" step="1" value="${esc(d.prizeUsd)}" ${F ? '' : 'disabled'}> <span>total · paid in NEAR</span>${F ? `<button class="btn" data-act="waPrize">Save</button>` : ''}</div>
+    <div class="wa-note">Split <b>${d.split.join(' / ')}</b> · ≈ ${num(totalNear, 2)} NEAR at $${num(price, 2)}<br>Changes apply from the next payout.</div></div>`;
+  const weeksLeft = price && d.balanceNear != null && d.prizeUsd ? Math.floor((d.balanceNear * price) / d.prizeUsd) : null;
+  const walletCard = `<div class="card wa-c4"><h3>AGENT WALLET</h3>
+    <div class="wa-big">${d.balanceNear == null ? '—' : num(d.balanceNear, 2) + ' NEAR'} <small>${d.balanceNear != null && price ? `≈ $${num(d.balanceNear * price, 1)} · ${weeksLeft} week${weeksLeft === 1 ? '' : 's'} left` : ''}</small></div>
+    ${d.ownerWithdraw ? `<div class="wa-note">Last withdraw: ${num(d.ownerWithdraw.amountNear, 3)} NEAR · ${esc(d.ownerWithdraw.status)}${d.ownerWithdraw.txHash ? ` · <a href="${explorer(d.ownerWithdraw.txHash, true)}" target="_blank" rel="noopener">tx ↗</a>` : ''}${d.ownerWithdraw.error ? ' · ' + esc(d.ownerWithdraw.error) : ''}</div>` : ''}
+    ${F && d.agentId ? `<div class="acts" style="margin-top:8px"><button class="btn gold" data-act="waFund">＋ Add funds</button>${d.hasGrant ? `<button class="btn" data-act="waWithdraw">Withdraw to ${esc(d.owner)}</button>` : ''}</div>` : ''}</div>`;
+  const nx = new Date(d.nextResetAt);
+  const nextCard = `<div class="card wa-c4"><h3>NEXT PAYOUT</h3>
+    <div class="wa-big">${esc(nx.toLocaleString(undefined, { weekday: 'short', hour: '2-digit', minute: '2-digit', hour12: false }))} <small>${esc(Intl.DateTimeFormat().resolvedOptions().timeZone)} · ${esc(inTime(nx))}</small></div>
+    <div class="wa-note">Queued at reset → sent 30 min later</div></div>`;
+
+  const leaders = `<div class="card wa-c7"><h3>WHO WOULD WIN RIGHT NOW</h3>${d.leadersNow.length ? `<div class="tbl"><table><tr><th>#</th><th>PLAYER</th><th>MAINNET WALLET</th><th style="text-align:right">PRIZE</th></tr>
+    ${d.leadersNow.map((w) => `<tr><td>${w.rank}</td><td><b>${esc(w.username || w.name)}</b> <small class="muted">${num(w.points)} pts</small></td><td>${w.wallet ? `<span class="mono">${esc(w.wallet)}</span>` : '<span class="tag pass">NO WALLET YET</span>'}</td><td class="mono" style="text-align:right">$${num(w.usd, 2)} · ${w.wallet ? num(w.near, 2) + ' N' : 'held 30 days'}</td></tr>`).join('')}</table></div>` : '<div class="empty">Nobody has points this week yet.</div>'}
+    <p class="wa-note" style="margin:8px 0 0">No mainnet wallet linked? The prize waits 30 days; the player gets an Inbox message to add one (Ranks → Prize wallet). After 30 days it stays in the agent.</p></div>`;
+
+  const p = d.policy;
+  const frozen = p && p.frozen;
+  const status = !d.agentId ? '<span class="tag dim">NOT CREATED</span>' : frozen ? '<span class="tag red">FROZEN</span>' : p && p.status !== 'APPLIED' ? `<span class="tag pass">${esc(p.status || 'APPLYING')}</span>` : d.mode === 'withdraw_to_owner' ? '<span class="tag pass">WITHDRAW MODE</span>' : '<span class="tag ok">ACTIVE</span>';
+  const canDo = p && p.actions ? (p.actions.length === 1 && p.actions[0] === 'withdraw' ? 'withdraw NEAR only — no swaps, no transfers' : p.actions.join(', ')) : 'withdraw NEAR only — no swaps, no transfers';
+  const rules = `<div class="card wa-c5"><h3>THE AGENT'S RULES (SIGNED BY ${esc(d.owner.toUpperCase())})</h3>
+    <div class="kv"><span>Owner</span><b>${esc(d.owner)}</b><span>Agent id</span><b class="mono">${esc(shortId(d.agentId))}</b>
+      <span>Can do</span><b>${esc(canDo)}</b>
+      <span>Sends to</span><b>${p && p.destinations === 'only' ? esc(d.owner) + ' only' : 'the winners\' wallets'}</b>
+      <span>Weekly cap</span><b>${p && p.capUsd != null ? `$${num(p.capUsd)} (covers the $${num(d.prizeUsd)} prize + margin)` : p ? 'none' : `$${Math.max(15, Math.ceil(d.prizeUsd * 1.5))} (covers the $${num(d.prizeUsd)} prize + margin)`}</b>
+      <span>One payment</span><b>${p && p.perTxNear != null ? `max ${num(p.perTxNear, 2)} NEAR` : p ? 'no cap' : 'max 3 NEAR'}</b>
+      <span>Timer</span><b>30 min before each weekly batch (cancel here)</b>
+      <span>Status</span><b>${status}</b></div>
+    ${F && d.agentId ? `<div class="acts" style="margin-top:10px">${d.mode === 'withdraw_to_owner' ? `<button class="btn solid" data-act="waRules">Resume payouts (sign)</button>` : `<button class="btn" data-act="waRules">Change rules (sign)</button>`}${frozen ? `<button class="btn" data-act="waUnfreeze">Unfreeze (sign)</button>` : `<button class="btn red" data-act="waFreeze">Freeze agent</button>`}</div>` : ''}</div>`;
+
+  const cur = d.current;
+  const wRow = (w) => `<div class="wa-rk"><span class="p">#${w.rank}</span><span><b>${esc(w.username || w.name)}</b></span><span class="mono ${w.wallet ? 'muted' : 'wa-no'}">${w.wallet ? esc(w.wallet) : 'no wallet · held 30 days'}</span><span class="mono">${num(w.amountNear, 2)} NEAR</span></div>`;
+  const batch = cur ? `<div class="card wa-c12 wa-gold"><h3 style="color:var(--g)">THIS WEEK'S PAYOUT · ${esc(cur.label.toUpperCase())} · ALL ${cur.winners.length} GO TOGETHER</h3>
+    <div class="row" style="gap:22px;align-items:center">
+      <div><div class="wa-lbl">${cur.status === 'countdown' ? 'SENDING IN' : 'SENDING'}</div><div class="wa-cd" ${cur.status === 'countdown' ? `data-cd="${esc(cur.sendAt)}"` : ''}>${cur.status === 'countdown' ? mmss(new Date(cur.sendAt) - Date.now()) : '…'}</div></div>
+      <div style="flex:1;min-width:280px">${cur.winners.map(wRow).join('')}</div>
+      ${F && cur.status === 'countdown' ? `<div class="acts" style="flex-direction:column"><button class="btn solid" data-act="waSendNow" data-id="${esc(cur.id)}">Send now</button><button class="btn red" data-act="waCancel" data-id="${esc(cur.id)}">Cancel this week</button></div>` : ''}
+    </div>
+    <p class="wa-note" style="margin:10px 0 0">At the weekly reset all three prizes are queued as <b>one batch</b> with one 30-minute timer. When it reaches 0:00 the agent sends them together. Cancel stops the whole batch (nobody is paid that week, everyone gets a short Inbox note).</p></div>` : '';
+
+  const tag = (b, w) => {
+    if (b.status === 'countdown' && (w.status === 'queued' || w.status === 'held')) return `<span class="tag pass">SENDING IN <span data-cd="${esc(b.sendAt)}">${mmss(new Date(b.sendAt) - Date.now())}</span></span>`;
+    const m = { paid: ['ok', 'PAID'], sending: ['blue', 'SENDING'], queued: ['blue', 'QUEUED'], held: ['pass', 'WAITING FOR WALLET'], failed: ['red', 'FAILED'], cancelled: ['dim', 'CANCELLED'], expired: ['dim', 'EXPIRED'] }[w.status] || ['dim', w.status.toUpperCase()];
+    return `<span class="tag ${m[0]}">${m[1]}</span>${w.status === 'held' && w.heldUntil ? ` <small class="muted">until ${esc(new Date(w.heldUntil).toLocaleDateString())}</small>` : ''}${w.error ? `<div class="muted" style="font-size:11px;margin-top:3px">${esc(w.error)}</div>` : ''}`;
+  };
+  const rows = d.history.flatMap((b) => b.winners.map((w) => `<tr><td>${esc(b.label)}</td><td><b>${esc(w.username || w.name)}</b> <small class="muted">#${w.rank}</small></td><td class="mono">${esc(w.wallet || '—')}</td><td class="mono" style="text-align:right">${num(w.amountNear, 3)} NEAR</td><td>${tag(b, w)}</td><td class="mono">${w.txHash ? `<a href="${explorer(w.txHash, true)}" target="_blank" rel="noopener">tx ${esc(w.txHash.slice(0, 4))}…${esc(w.txHash.slice(-2))} ↗</a>` : '—'}${F && w.status === 'failed' ? ` <button class="btn ghost" data-act="waRetry" data-id="${esc(b.id)}" data-r="${w.rank}">Retry</button>` : ''}</td></tr>`));
+  const payouts = `<div class="card wa-c12"><h3>PAYOUTS</h3>${rows.length ? `<div class="tbl"><table><tr><th>WEEK</th><th>PLAYER</th><th>WALLET</th><th style="text-align:right">AMOUNT</th><th>STATUS</th><th>PROOF</th></tr>${rows.join('')}</table></div>` : '<div class="empty">No weekly payouts yet.</div>'}</div>`;
+  const off = `<div class="card wa-c12"><h3>WHEN YOU SWITCH IT OFF</h3><p class="wa-note" style="margin:0">You choose: <b>"Pay this week, then stop"</b> or <b>"Stop now"</b>. The prize banner disappears from Ranks immediately; nobody is promised anything. Remaining NEAR stays in the agent until you withdraw it.</p></div>`;
+
+  el.innerHTML = `${head}${warnHtml}<div class="wa-grid">${setup}${prizeCard}${walletCard}${nextCard}${leaders}${rules}${batch}${payouts}${off}</div>`;
+};
+
+R.wallets = async (el) => {
+  const [d, h] = await Promise.all([api('/admin/revenue'), api('/admin/revenue-wallet-history').catch(() => null)]);
+  const w = (title, bal, acct, note, cls = '') => `<div class="card"><div class="muted mono" style="font-size:10px;letter-spacing:.12em">${title}</div><b style="display:block;font:700 22px var(--disp);margin:6px 0 2px;${cls}">${bal}</b><div class="mono" style="color:var(--m);font-size:11px;word-break:break-all">${esc(acct || 'not set')}</div>${note ? `<div class="muted" style="font-size:11.5px;margin-top:6px">${note}</div>` : ''}</div>`;
+  el.innerHTML = `<div class="kpis">
+      ${w('PLAY PASS · MAINNET', d.playPassWalletBalanceNear == null ? '—' : near(d.playPassWalletBalanceNear) + ' NEAR', d.playPassWallet, `${num(d.playPassMainnetSold)} sold · ${near(d.playPassMainnetRevenueNear)} NEAR in`)}
+      ${w('POOL CONTRACT · TESTNET', d.contractBalanceNear == null ? '—' : near(d.contractBalanceNear) + ' tNEAR', d.contractAccountId, 'Every locked pool\'s money + unwithdrawn fees')}
+      ${w('ORACLE / GAS · TESTNET', d.oracleBalanceNear == null ? '—' : near(d.oracleBalanceNear) + ' tNEAR', d.oracleAccountId, d.oracleLowBalance ? '<span style="color:var(--r)">Low — top it up so payouts keep working</span>' : 'Pays gas, prizes, new-wallet gifts', d.oracleLowBalance ? 'color:var(--r)' : '')}
+      ${w('OWNER · TESTNET', d.ownerBalanceNear == null ? '—' : near(d.ownerBalanceNear) + ' tNEAR', d.ownerAccountId, 'Where withdrawn 5% pool fees land')}
+    </div>
+    <div class="grid2 even"><div class="card"><h3>TESTNET INCOME</h3><div class="kv"><span>Pool fees (all time)</span><b>${near(d.lifetimeFeesNear)} tNEAR</b><span>Fees not withdrawn</span><b>${d.platformFeesBalanceNear == null ? '—' : near(d.platformFeesBalanceNear) + ' tNEAR'}</b><span>Custom avatars</span><b>${near(d.customAvatarRevenueNear)} tNEAR · ${num(d.customAvatarPaidRequestCount)} paid</b><span>Old test-NEAR Play Pass</span><b>${near(d.playPassRevenueNear)} tNEAR · ${num(d.playPassPurchaseCount)}</b><span>Gifted Play Passes</span><b>${num(d.premiumGrantsCount)}</b></div><p class="d" style="margin:0">Testnet money has no real value and is never added to the mainnet Play Pass total.</p></div>
+    <div class="card"><h3>REVENUE WALLET · RECENT ON-CHAIN</h3>${h && h.rows && h.rows.length ? `<div class="tbl"><table><tr><th>WHEN</th><th>FROM / TO</th><th>NEAR</th><th></th></tr>${h.rows.slice(0, 20).map((r) => `<tr><td class="mono">${when(r.time || r.createdAt || r.blockTimestamp)}</td><td class="mono">${esc(r.from || r.counterparty || r.signer || '')}</td><td>${esc(r.amountNear != null ? r.amountNear : '')}</td><td>${r.txHash ? `<a class="mono" href="${explorer(r.txHash)}" target="_blank" rel="noreferrer">tx ↗</a>` : ''}</td></tr>`).join('')}</table></div>` : '<div class="muted">Not available on this server.</div>'}</div></div>`;
+};
+
+/* $SABOTEUR */
+R.saboteur = async (el) => {
+  const d = await api('/admin/saboteur');
+  const sum = (f) => (d.totals || []).filter(f).reduce((s, t) => s + t.amount, 0);
+  el.innerHTML = `${d.rewardsLow ? `<div class="err">Rewards wallet is low (${num(d.rewardsBalance)}). Refill ${esc(d.rewards)} from the treasury — its key is offline on your Mac. Until then new rewards wait as "retrying".</div>` : ''}
+    <div class="kpis"><div class="kpi"><span>REWARDS WALLET</span><b style="color:${d.rewardsLow ? 'var(--r)' : 'inherit'}">${num(d.rewardsBalance)}</b><small>server pays from here</small></div><div class="kpi"><span>TREASURY (OFFLINE)</span><b>${num(d.treasuryBalance)}</b><small>${esc(d.treasury || '')}</small></div><div class="kpi"><span>PAID TO PLAYERS</span><b>${num(sum((t) => t._id.t === 'player' && t._id.s === 'sent'))}</b><small>all time</small></div><div class="kpi"><span>WAITING / RETRYING</span><b>${num(sum((t) => t._id.s === 'pending' || t._id.s === 'failed'))}</b><small>will pay when refilled</small></div></div>
+    <div class="grid2 even"><div class="card"><h3>TOP EARNERS</h3>${(d.topPlayers || []).length ? `<div class="tbl"><table><tr><th>PLAYER</th><th>EARNED</th><th>MATCHES</th></tr>${d.topPlayers.map((p) => `<tr><td>${esc(p.name || p._id)}</td><td>${num(p.earned)}</td><td>${num(p.matches)}</td></tr>`).join('')}</table></div>` : '<div class="muted">No rewards yet.</div>'}</div>
+    <div class="card"><h3>FARM FLAGS · 24H</h3><p class="d">Accounts with unusual patterns. Worth a look — not proof of cheating.</p>${(d.farmFlags || []).length ? `<div class="tbl"><table><tr><th>PLAYER</th><th>MATCHES</th><th>TOP 3</th><th>SOLO</th></tr>${d.farmFlags.map((f) => `<tr class="click" data-act="pl2" data-id="${esc(f._id)}"><td>${esc(f.name || f._id)}</td><td>${num(f.matches)}</td><td>${num(f.top3)}</td><td>${num(f.solo)}</td></tr>`).join('')}</table></div>` : '<div class="muted">Nothing flagged.</div>'}</div></div>
+    <div class="card"><h3>TOKEN</h3><div class="kv"><span>Token</span><b>${d.token ? `<a href="https://testnet.nearblocks.io/token/${esc(d.token)}" target="_blank" rel="noreferrer">${esc(d.token)}</a>` : 'not configured'}</b><span>Bot treasury</span><b>${num(d.botTreasuryBalance)} · ${esc(d.botTreasury || '')}</b><span>Last 24h</span><b>${(d.last24 || []).map((x) => `${esc(x.holderType)} ${num(x.amount)} (${x.matches} matches)`).join(' · ') || 'nothing yet'}</b><span>Rewards by rank</span><b>${esc(((d.rules || {}).rewardsByRank || []).join(' / '))} · others ${esc((d.rules || {}).rewardFinished)} · Play Pass ×${esc((d.rules || {}).playPassMultiplier || 2)}</b></div></div>`;
+};
+ACT.pl2 = (r) => go('players', r.dataset.id);
+
+/* reports */
+let reQ = { status: 'open', type: '', page: 1 };
+R.reports = async (el) => {
+  refreshCounts(); // badges update in the background - never hold the page
+  const d = await api(`/admin/reports?page=${reQ.page}${reQ.status ? '&status=' + reQ.status : ''}${reQ.type ? '&type=' + reQ.type : ''}`);
+  el.innerHTML = `<div class="row"><div class="chips">${[['open', `Open · ${d.openCount}`], ['resolved', 'Resolved'], ['', 'All']].map(([k, t]) => `<button class="chip ${reQ.status === k ? 'on' : ''}" data-act="reS" data-k="${k}">${t}</button>`).join('')}</div><div class="chips">${[['', 'Any type'], ['dispute', 'Disputes'], ['feedback', 'Feedback']].map(([k, t]) => `<button class="chip ${reQ.type === k ? 'on' : ''}" data-act="reT" data-k="${k}">${t}</button>`).join('')}</div></div>
+    ${d.reports.length ? d.reports.map((r) => `<div class="item ${r.status === 'open' && r.type === 'dispute' ? 'warn' : ''}"><div class="row"><span class="tag ${r.type === 'dispute' ? 'red' : 'blue'}">${esc(r.type.toUpperCase())}</span><span class="t">${esc(r.subject)}</span><small>· ${esc(r.playerName || '')}${r.playerUsername ? ' @' + esc(r.playerUsername) : ''} · ${when(r.createdAt)}</small>${r.status === 'resolved' ? '<span class="tag ok">RESOLVED</span>' : ''}</div>
+      ${r.body ? `<p>${esc(r.body)}</p>` : ''}
+      ${r.status === 'resolved' ? `<p class="muted" style="font-size:12px">${r.replySentText ? `Replied: "${esc(r.replySentText)}"` : 'No reply sent.'}${r.adminNote ? ` · Note: ${esc(r.adminNote)}` : ''}</p>` : guard(`<div class="acts" style="margin-top:10px"><button class="btn solid" data-act="reRes" data-id="${r._id}" data-type="${esc(r.type)}">Resolve…</button>${r.playerId ? `<button class="btn ghost" data-act="pl2" data-id="${esc(r.playerId)}">Open player</button>` : ''}</div>`)}
+    </div>`).join('') + pager(d.page, d.pages, (n) => { reQ.page = n; load(false); }) : `<div class="empty">${reQ.status === 'open' ? 'No open reports. 🎉' : 'Nothing here.'}</div>`}`;
+};
+ACT.reS = (b) => { reQ.status = b.dataset.k; reQ.page = 1; load(true); };
+ACT.reT = (b) => { reQ.type = b.dataset.k; reQ.page = 1; load(true); };
+ACT.reRes = async (b) => {
+  const auto = b.dataset.type === 'dispute' ? "Thanks for reaching out - we've looked into this and it's been resolved." : 'Thanks for the feedback - we really appreciate it!';
+  const v = await ask({ title: 'Resolve report', body: 'Write a reply for the player\'s Inbox, or leave it as is. Clear the box to send nothing.', input: { label: 'REPLY TO PLAYER', textarea: true, value: auto }, ok: 'Resolve' });
+  if (v === null) return;
+  const note = await ask({ title: 'Private note (optional)', body: 'Only admins see this.', input: { label: 'NOTE', placeholder: 'What you found / did' }, ok: 'Save' });
+  const reply = v.trim();
+  await act(b, () => api(`/admin/reports/${b.dataset.id}/resolve`, { json: { note: note || '', replyMode: reply ? 'custom' : 'skip', replyText: reply } }), 'Resolved'); load(false);
+};
+
+/* inbox */
+let ibQ = { page: 1, search: '', source: '' };
+R.inbox = async (el, first) => {
+  const to = STATE.msgTo;
+  const d = await api(`/admin/inbox?page=${ibQ.page}&search=${encodeURIComponent(ibQ.search)}${ibQ.source ? '&source=' + ibQ.source : ''}`);
+  const hist = `${d.messages.length ? d.messages.map((m) => `<div class="item"><div class="row"><span class="tag dim">${esc(m.nameTag || '')}</span><span class="t">${esc(m.title)}</span><small>→ ${esc(m.recipient ? (m.recipient.username ? '@' + m.recipient.username : m.recipient.name) : '?')} · ${when(m.createdAt)} · ${m.read ? 'read' : 'unread'} · ${esc(m.source || 'auto')}</small>${guard(`<button class="btn ghost" style="margin-left:auto" data-act="ibDel" data-id="${m._id}">Delete</button>`)}</div>${m.body ? `<p>${esc(m.body)}</p>` : ''}</div>`).join('') : '<div class="empty">No messages.</div>'}${pager(d.page, d.pages, (n) => { ibQ.page = n; load(false); })}`;
+  if (first || !$('#ibHist')) {
+    el.innerHTML = `${guard(`<div class="card"><h3>SEND TO ONE PLAYER</h3>
+        <div class="field"><label>PLAYER</label><div class="row"><input class="in" id="ibTo" placeholder="Search name, @username or email" value="${esc(to ? to.name : '')}" style="max-width:340px"><span class="mono" id="ibToSel" style="color:var(--m)">${to ? '✓ ' + esc(to.name) : ''}</span></div><div id="ibRes" style="margin-top:6px"></div></div>
+        <div class="field"><label>TITLE</label><input class="in" id="ibTitle" maxlength="120"></div>
+        <div class="field"><label>MESSAGE</label><textarea class="in" id="ibBody" maxlength="2000"></textarea></div>
+        <div class="field"><label>FROM (TAG)</label><input class="in" id="ibTag" value="NEAR Saboteur" style="max-width:240px"></div>
+        <button class="btn solid" data-act="ibSend">Send to Inbox</button></div>`)}
+      <div class="row"><input class="in" id="ibS" placeholder="Search sent messages…" value="${esc(ibQ.search)}" style="max-width:300px"><div class="chips">${[['', 'All'], ['manual', 'Sent by you'], ['auto', 'Automatic']].map(([k, t]) => `<button class="chip ${ibQ.source === k ? 'on' : ''}" data-act="ibSrc" data-k="${k}">${t}</button>`).join('')}</div></div><div id="ibHist">${hist}</div>`;
+    let t; $('#ibS').oninput = (e) => { clearTimeout(t); t = setTimeout(() => { ibQ.search = e.target.value.trim(); ibQ.page = 1; load(false); }, 300); };
+    const ti = $('#ibTo'); if (ti) { let t2; ti.oninput = (e) => { STATE.msgTo = null; $('#ibToSel').textContent = ''; clearTimeout(t2); const q = e.target.value.trim(); if (!q) { $('#ibRes').innerHTML = ''; return; } t2 = setTimeout(async () => { const r = await api(`/admin/players?search=${encodeURIComponent(q)}`).catch(() => ({ players: [] })); $('#ibRes').innerHTML = r.players.slice(0, 6).map((p) => `<button class="chip" data-act="ibPick" data-id="${p._id}" data-n="${esc(p.name || p.username)}">${esc(p.name || '—')}${p.username ? ' @' + esc(p.username) : ''}</button>`).join(' ') || '<span class="muted">No match</span>'; }, 250); }; }
+  } else $('#ibHist').innerHTML = hist;
+};
+ACT.ibPick = (b) => { STATE.msgTo = { id: b.dataset.id, name: b.dataset.n }; $('#ibTo').value = b.dataset.n; $('#ibToSel').textContent = '✓ ' + b.dataset.n; $('#ibRes').innerHTML = ''; };
+ACT.ibSrc = (b) => { ibQ.source = b.dataset.k; ibQ.page = 1; load(true); };
+ACT.ibSend = async (b) => {
+  if (!STATE.msgTo) return toast('Pick a player from the search first.', true);
+  const title = $('#ibTitle').value.trim(); if (!title) return toast('Title is required.', true);
+  await act(b, () => api('/admin/inbox/send', { json: { playerId: STATE.msgTo.id, title, body: $('#ibBody').value.trim(), nameTag: $('#ibTag').value.trim() || 'NEAR Saboteur' } }), `Sent to ${STATE.msgTo.name}`);
+  $('#ibTitle').value = ''; $('#ibBody').value = ''; load(false);
+};
+ACT.ibDel = async (b) => { if (!await ask({ title: 'Delete this message?', body: 'It disappears from the player\'s Inbox too.', ok: 'Delete', danger: true })) return; await act(b, () => api('/admin/inbox/' + b.dataset.id, { method: 'DELETE' }), 'Deleted'); load(false); };
+
+/* news */
+R.news = async (el) => {
+  const d = await api('/admin/announcements');
+  el.innerHTML = `${guard(`<div class="card"><h3>POST TO NEWS</h3>
+      <div class="field"><label>TITLE</label><input class="in" id="nwT" maxlength="120"></div>
+      <div class="field"><label>MESSAGE</label><textarea class="in" id="nwB" maxlength="2000"></textarea></div>
+      <div class="grid2 even"><div class="field"><label>FROM (TAG)</label><input class="in" id="nwTag" value="NEAR Saboteur"></div><div class="field"><label>EXPIRES IN (DAYS)</label><input class="in" id="nwE" type="number" min="1" placeholder="empty = never"></div></div>
+      <div class="field"><label>IMAGE URL (OPTIONAL)</label><input class="in" id="nwI" placeholder="https://…"></div>
+      <button class="btn solid" data-act="nwPost">Post to everyone</button></div>`)}
+    <div class="card"><h3>POSTED <span class="r">${d.announcements.length}</span></h3>${d.announcements.length ? d.announcements.map((a) => `<div class="item"><div class="row"><span class="t">${esc(a.title)}</span><small>· ${when(a.createdAt)}${a.expiresAt ? ' · expires ' + new Date(a.expiresAt).toLocaleDateString() : ''}</small>${guard(`<button class="btn ghost" style="margin-left:auto" data-act="nwDel" data-id="${a._id}">Delete</button>`)}</div>${a.body ? `<p>${esc(a.body)}</p>` : ''}</div>`).join('') : '<div class="empty">Nothing posted yet.</div>'}</div>`;
+};
+ACT.nwPost = async (b) => {
+  const title = $('#nwT').value.trim(); if (!title) return toast('Title is required.', true);
+  const img = $('#nwI').value.trim(); if (img && !/^https:\/\//.test(img)) return toast('Image URL must start with https://', true);
+  if (!await ask({ title: 'Post to every player?', body: `"<b>${esc(title)}</b>" will show in everyone's News tab.`, ok: 'Post' })) return;
+  await act(b, () => api('/admin/announcements', { json: { title, body: $('#nwB').value.trim(), nameTag: $('#nwTag').value.trim() || 'NEAR Saboteur', imageUrl: img || null, expiresInDays: $('#nwE').value || null } }), 'Posted'); load(true);
+};
+ACT.nwDel = async (b) => { if (!await ask({ title: 'Delete this post?', body: 'It disappears from News for everyone.', ok: 'Delete', danger: true })) return; await act(b, () => api('/admin/announcements/' + b.dataset.id, { method: 'DELETE' }), 'Deleted'); load(true); };
+
+/* custom avatars */
+let avPage = 1;
+R.avatars = async (el) => {
+  refreshCounts(); // badges update in the background - never hold the page
+  const [c, d] = await Promise.all([api('/admin/custom-avatar-request/config'), api('/admin/custom-avatar-request/list?page=' + avPage)]);
+  el.innerHTML = `<div class="grid2"><div class="card"><h3>REQUESTS <span class="r">${num(d.total)}</span></h3>${d.requests.length ? d.requests.map((r) => `<div class="item ${r.status === 'submitted' ? 'warn' : ''}"><div class="row"><span class="tag ${r.status === 'submitted' ? 'pass' : 'ok'}">${esc((r.status || '').toUpperCase())}</span><span class="t">${esc(r.playerName || '—')}</span><small>· ${when(r.createdAt)}${r.pricePaidNear ? ' · paid ' + r.pricePaidNear : ''}${r.telegramUsername ? ' · tg @' + esc(r.telegramUsername) : ''}</small></div>
+      <p>${esc(r.description || '')}</p><div class="acts" style="margin-top:8px"><button class="btn ghost" data-act="avImg" data-id="${r._id}">View image</button>${guard(`<button class="btn" data-act="avReply" data-id="${r._id}">${r.adminReply ? 'Reply again' : 'Reply'}</button><button class="btn red" data-act="avDel" data-id="${r._id}">Delete</button>`)}</div>${r.adminReply ? `<p class="muted" style="font-size:12px">Your reply: "${esc(r.adminReply)}"</p>` : ''}</div>`).join('') + pager(d.page, d.pages, (n) => { avPage = n; load(false); }) : '<div class="empty">No requests yet.</div>'}</div>
+    <div class="card"><h3>SETTINGS</h3>
+      <div class="field"><label>PRICE (NEAR)</label><input class="in" id="avP" type="number" min="0" step="0.1" value="${c.priceNear}" ${isFull() ? '' : 'disabled'}></div>
+      <div class="field"><label>TELEGRAM LINK</label><input class="in" id="avT" value="${esc(c.telegramLink || '')}" placeholder="https://t.me/…" ${isFull() ? '' : 'disabled'}><div class="hint">Shown to the player after they request, so you can talk about the design.</div></div>
+      <div class="toggle ${c.enabled ? 'on' : ''}" id="avEn" ${isFull() ? 'data-act="avEn"' : ''} style="margin:4px 0 14px"><div class="sw"></div><b style="font-weight:600">${c.enabled ? 'Requests are ON' : 'Requests are OFF'}</b></div>
+      ${guard('<button class="btn solid" data-act="avSave">Save</button>')}</div></div>`;
+};
+ACT.avEn = (t) => { t.classList.toggle('on'); t.querySelector('b').textContent = t.classList.contains('on') ? 'Requests are ON' : 'Requests are OFF'; };
+ACT.avSave = async (b) => { const link = $('#avT').value.trim(); if (link && !/^https:\/\//.test(link)) return toast('Telegram link must start with https://', true); await act(b, () => api('/admin/custom-avatar-request/config', { json: { priceNear: Number($('#avP').value) || 0, telegramLink: link, enabled: $('#avEn').classList.contains('on') } }), 'Saved'); load(true); };
+ACT.avImg = async (b) => {
+  try { const r = await fetch(`/admin/custom-avatar-request/${b.dataset.id}/image`, { headers: { Authorization: 'Bearer ' + TOKEN } }); if (!r.ok) throw new Error('No image'); const url = URL.createObjectURL(await r.blob()); await ask({ title: 'Reference image', body: `<img src="${url}" alt="" style="max-width:100%;border-radius:6px">`, ok: false, cancel: 'Close' }); URL.revokeObjectURL(url); } catch (e) { toast(e.message, true); }
+};
+ACT.avReply = async (b) => { const v = await ask({ title: 'Reply to request', body: 'Goes to the player\'s Inbox.', input: { label: 'REPLY', textarea: true }, ok: 'Send' }); if (!v || !v.trim()) return; await act(b, () => api(`/admin/custom-avatar-request/${b.dataset.id}/reply`, { json: { reply: v.trim() } }), 'Reply sent'); load(false); };
+ACT.avDel = async (b) => { if (!await ask({ title: 'Delete this request?', body: 'This can\'t be undone. It does not refund a payment.', ok: 'Delete', danger: true })) return; await act(b, () => api('/admin/custom-avatar-request/' + b.dataset.id, { method: 'DELETE' }), 'Deleted'); load(false); };
+
+/* leaderboard */
+let lbTab = 'weekly';
+R.leaderboard = async (el) => {
+  const d = await fetch('/leaderboard/' + lbTab).then((r) => r.json()).catch(() => ({ leaderboard: [] }));
+  el.innerHTML = `<div class="row"><div class="chips">${['weekly', 'monthly'].map((k) => `<button class="chip ${lbTab === k ? 'on' : ''}" data-act="lbT" data-k="${k}">${k[0].toUpperCase() + k.slice(1)}</button>`).join('')}</div>${d.nextResetAt ? `<span class="muted mono">auto reset ${new Date(d.nextResetAt).toLocaleString()}</span>` : ''}${guard(`<button class="btn red" style="margin-left:auto" data-act="lbReset">Reset ${lbTab} now</button>`)}</div>
+    <div class="card" style="padding:8px 10px">${(d.leaderboard || []).length ? `<div class="tbl"><table><tr><th>#</th><th>PLAYER</th><th>POINTS</th><th></th></tr>${d.leaderboard.map((p) => `<tr><td><b style="color:${p.rank <= 3 ? 'var(--g)' : 'inherit'}">${p.rank}</b></td><td class="who"><b>${esc(p.name || '—')}</b><small>${p.username ? '@' + esc(p.username) : ''}</small></td><td>${num(p.points)}</td><td>${p.hasPlayPass ? '<span class="tag pass">PASS</span>' : ''} ${p.hasLegionBadge ? '<span class="tag blue">LEGION</span>' : ''}</td></tr>`).join('')}</table></div>` : '<div class="empty">No points yet this period.</div>'}</div>`;
+};
+ACT.lbT = (b) => { lbTab = b.dataset.k; load(true); };
+ACT.lbReset = async (b) => { if (!await ask({ title: `Reset the ${lbTab} leaderboard?`, body: 'The board starts again from zero right now. Players keep their match history and total points.', ok: 'Reset', danger: true })) return; await act(b, () => api('/admin/leaderboard/reset', { json: { type: lbTab } }), 'Leaderboard reset'); load(true); };
+
+/* log */
+let lgPage = 1;
+R.log = async (el) => {
+  const d = await api('/admin/action-log?page=' + lgPage);
+  STATE.logs = d.logs;
+  el.innerHTML = `<div class="card" style="padding:8px 10px">${d.logs.length ? `<div class="tbl"><table><tr><th>WHEN</th><th>ACTION</th><th>DETAILS</th></tr>${d.logs.map((l, i) => `<tr class="click" data-act="lgD" data-i="${i}"><td class="mono">${when(l.createdAt)}</td><td><span class="tag ${/fail|hold|refund|revoke|delete/.test(l.action) ? 'red' : /grant|purchas|gift/.test(l.action) ? 'pass' : 'dim'}">${esc(l.action)}</span></td><td class="muted" style="font-size:12px">${esc(Object.entries(l.details || {}).slice(0, 3).map(([k, v]) => `${k}: ${typeof v === 'object' ? JSON.stringify(v) : v}`).join(' · ')).slice(0, 140)}</td></tr>`).join('')}</table></div>` : '<div class="empty">Nothing logged yet.</div>'}${pager(d.page, d.pages, (n) => { lgPage = n; load(false); })}</div>`;
+};
+ACT.lgD = (r) => { const l = STATE.logs[r.dataset.i]; if (!l) return; ask({ title: l.action, body: `<div class="muted mono" style="margin-bottom:10px">${full(l.createdAt)}</div><div class="kv">${Object.entries(l.details || {}).map(([k, v]) => `<span>${esc(k)}</span><b>${esc(typeof v === 'object' ? JSON.stringify(v) : String(v))}</b>`).join('') || '<span>—</span><b>No details</b>'}</div>`, ok: false, cancel: 'Close' }); };
+
+/* system */
+R.system = async (el) => {
+  const db = await api('/admin/db-stats').catch(() => null);
+  el.innerHTML = `<div class="grid2 even"><div class="card"><h3>BACKUPS</h3><p class="d">The free MongoDB has no automatic backups. Download a full copy regularly and keep it somewhere safe (not in the repo).</p><div class="acts"><button class="btn solid" data-act="dl" data-u="/admin/backup/export" data-n="backup.json">⬇ Full backup (JSON)</button><button class="btn" data-act="dl" data-u="/admin/export/csv?type=players" data-n="players.csv">Players CSV</button><button class="btn" data-act="dl" data-u="/admin/export/csv?type=matches" data-n="matches.csv">Matches CSV</button><button class="btn" data-act="dl" data-u="/admin/export/csv?type=funds" data-n="money.csv">Money CSV</button></div></div>
+    <div class="card"><h3>DATABASE USAGE</h3>${db ? `<div class="kv"><span>Storage</span><b>${db.storageUsedMb} / ${db.storageLimitMb} MB (${db.percentUsed}%)</b><span>Data</span><b>${db.dataUsedMb} MB</b><span>Indexes</span><b>${db.indexUsedMb} MB</b><span>Collections</span><b>${db.collections}</b><span>Server up</span><b>${Math.round(db.serverUptimeSeconds / 60)} min</b></div><div class="bar"><span class="${db.percentUsed > 85 ? 'bad' : db.percentUsed > 60 ? 'warn' : ''}" style="width:${Math.min(100, db.percentUsed)}%"></span></div>` : '<div class="muted">Unavailable</div>'}</div></div>`;
+};
+
+/* ============ boot ============ */
+function logout(silent) {
+  if (!silent && TOKEN) fetch('/admin/logout', { method: 'POST', headers: { Authorization: 'Bearer ' + TOKEN } }).catch(() => {});
+  TOKEN = null; localStorage.removeItem('nsAdminToken'); localStorage.removeItem('nsAdminRole');
+  clearTimeout(timer); $('#app').classList.add('hidden'); $('#login').classList.remove('hidden');
+}
+async function start() {
+  $('#login').classList.add('hidden'); $('#app').classList.remove('hidden');
+  const [, pg, pr] = (location.hash || '').split('/');
+  refreshCounts(); // badges update in the background - never hold the page
+  go(PAGES[pg] ? pg : 'overview', pr ? decodeURIComponent(pr) : null, false);
+}
+$('#lbtn').onclick = async () => {
+  const b = $('#lbtn'), e = $('#lerr'); e.classList.add('hidden');
+  b.disabled = true; b.textContent = 'SIGNING IN…';
+  try {
+    const d = await api('/admin/login', { json: { username: $('#lu').value.trim(), password: $('#lp').value } });
+    TOKEN = d.token; ROLE = d.role || 'full'; localStorage.setItem('nsAdminToken', TOKEN); localStorage.setItem('nsAdminRole', ROLE); $('#lp').value = '';
+    start();
+  } catch (err) { e.textContent = err.message; e.classList.remove('hidden'); }
+  b.disabled = false; b.textContent = 'SIGN IN';
+};
+['#lu', '#lp'].forEach((s) => $(s).addEventListener('keydown', (ev) => { if (ev.key === 'Enter') $('#lbtn').click(); }));
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && TOKEN && Date.now() - lastLoad > 15000) load(false); });
+window.addEventListener('hashchange', () => { const [, pg, pr] = location.hash.split('/'); const p = pr ? decodeURIComponent(pr) : null; if (PAGES[pg] && (pg !== current || p !== param)) go(pg, p, false); });
+if (TOKEN) start(); else $('#lu').focus();
+})();
+</script>
+</body>
+</html>

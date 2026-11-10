@@ -31,7 +31,7 @@ on:
       run_init:
         description: "Run the one-time 'new' setup call after deploying? (turn OFF if re-deploying an already-initialized contract)"
         required: true
-        default: true
+        default: false
         type: boolean
 
 jobs:
@@ -68,6 +68,11 @@ jobs:
       # contract this small builds in well under 15 seconds anyway - not
       # worth reintroducing any risk of this exact bug recurring for a
       # marginal speed gain.
+      # [v4] never deploy code that fails its own tests
+      - name: Run contract unit tests
+        working-directory: contract
+        run: cargo test
+
       - name: Build contract (WASM)
         working-directory: contract
         run: cargo build --target wasm32-unknown-unknown --release
