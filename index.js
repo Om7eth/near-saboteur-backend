@@ -4066,6 +4066,27 @@ app.post("/pools/manual/:poolId/paid", async (req, res) => {
   }
 });
 
+// [POOL v2 - UNPAID REMINDER] The home page asks this for the signed-in host:
+// their FINISHED Real-NEAR pools that still have a winner to pay. Only winners
+// with a wallet count (the host can't pay one without a wallet yet).
+app.get("/pools/host-unpaid", async (req, res) => {
+  try {
+    const account = await resolveAccountFromToken(req.query.sessionToken);
+    if (!account) return res.json({ count: 0, pools: [] });
+    const docs = await ManualPool.find({ hostAccountId: String(account.accountId), state: "Finished" }, "poolId poolName winners finishedAt").sort({ finishedAt: -1 }).limit(50).lean();
+    const pools = [];
+    for (const m of docs) {
+      const due = (m.winners || []).filter((w) => !w.paidAt && w.wallet && Number(w.amountNear) > 0);
+      if (!due.length) continue;
+      pools.push({ id: m.poolId, name: m.poolName || "Pool game", winners: due.length, near: Math.round(due.reduce((a, w) => a + Number(w.amountNear), 0) * 1e4) / 1e4, finishedAt: m.finishedAt || null });
+    }
+    res.json({ count: pools.length, winners: pools.reduce((a, p) => a + p.winners, 0), totalNear: Math.round(pools.reduce((a, p) => a + p.near, 0) * 1e4) / 1e4, pools });
+  } catch (e) {
+    console.error("[POOL] host-unpaid:", e.message);
+    res.json({ count: 0, pools: [] }); // a reminder must never break the home page
+  }
+});
+
 // [POOL v2] A player in a Real-NEAR pool lobby adds / changes their prize wallet.
 app.post("/pools/payout-wallet", async (req, res) => {
   try {
