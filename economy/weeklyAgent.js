@@ -564,6 +564,8 @@ async function announceIfDone(batch) {
     body: `${line}\nPaid automatically by the Saboteur Agent on NEAR Intents.${paid[0].txHash ? ` See proofs: https://nearblocks.io/txns/${paid[0].txHash}` : ""}`,
     nameTag: "NEAR Saboteur",
   }).catch((e) => console.error("[WEEKLY AGENT] announcement failed:", e.message));
+  // [TELEGRAM] same news in the official group's Announcements topic
+  if (D.tgAnnounce) D.tgAnnounce({ kind: "paid", photo: "weekly", winners: batch.winners.map((w) => ({ rank: w.rank, name: w.username || w.name, amountNear: w.amountNear, status: w.status })), label: batch.label, txHash: paid[0].txHash || null }).catch(() => {});
   batch.announced = true;
 }
 
@@ -710,6 +712,7 @@ async function announceOn(s) {
     body: `The top 3 on the weekly Ranks win real NEAR: 🥇 #1 $${fmtUsd(usd[0])}${n(usd[0])} · 🥈 #2 $${fmtUsd(usd[1])}${n(usd[1])} · 🥉 #3 $${fmtUsd(usd[2])}${n(usd[2])}.\nThis week's winners are decided at the weekly reset (${when} IST) and paid automatically 30 minutes later by the Saboteur Agent on NEAR Intents.\nAdd your mainnet NEAR wallet on Ranks so your prize can reach you. Optional and may change or stop at any time.`,
     nameTag: "NEAR Saboteur",
   });
+  if (D.tgAnnounce) D.tgAnnounce({ kind: "on", photo: "weekly", prizeUsd: s.prizeUsd, usd, price, when }).catch(() => {});
   s.onAnnouncedAt = new Date();
 }
 async function saveSettings({ enabled, prizeUsd, offMode }) {
@@ -732,6 +735,8 @@ async function saveSettings({ enabled, prizeUsd, offMode }) {
       }
     }
   } else if (enabled === false) {
+    const wasOn = s.enabled && !s.stopAfterWeekEnd;
+    if (wasOn && D.tgAnnounce) D.tgAnnounce({ kind: offMode === "after_this_week" ? "off_after_week" : "off" }).catch(() => {});
     if (offMode === "after_this_week") {
       s.stopAfterWeekEnd = new Date(D.getCurrentWeekStartUTC().getTime() + WEEK_MS);
     } else {

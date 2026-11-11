@@ -252,4 +252,16 @@ async function adminSummary() {
   };
 }
 
-module.exports = { recordBack, backVoteAllowed, backDelta, backsFor, settleMatch, startRetryLoop, playerSummary, botsSummary, adminSummary, TokenLedger };
+
+// [REFERRALS] 1,000 $SABOTEUR (testnet) to an inviter once their friend
+// qualifies. One ledger row per friend ("referral:<friendId>"), so it can
+// never be paid twice; failures are retried by the same 5-minute loop.
+async function payReferral({ referrerId, name, friendId, amount }) {
+  const matchId = `referral:${friendId}`;
+  if (await TokenLedger.exists({ matchId, holderId: String(referrerId) })) return;
+  const wallet = T.configured() ? T.walletForPlayer(String(referrerId)) : null;
+  const doc = await TokenLedger.create({ matchId, roomCode: "", holderType: "player", holderId: String(referrerId), name: name || "", wallet, rank: 0, players: 0, humans: 0, points: 0, amount, status: wallet ? "pending" : "skipped" });
+  if (wallet) payPending([doc], matchId).catch(() => {});
+}
+
+module.exports = { payReferral, recordBack, backVoteAllowed, backDelta, backsFor, settleMatch, startRetryLoop, playerSummary, botsSummary, adminSummary, TokenLedger };
