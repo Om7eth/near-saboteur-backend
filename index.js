@@ -7548,8 +7548,11 @@ async function tgCall(method, payload) {
   }
 }
 
+// [TG JOIN FIX] A plain site link (like the Watch buttons): opens the game
+// with ?join=CODE, which joins straight away once the player is signed in.
+// The old t.me/<bot>?startapp=CODE only worked if a Mini App was set up.
 function telegramRoomJoinUrl(code) {
-  return `https://t.me/${TELEGRAM_BOT_USERNAME}?startapp=${code}`;
+  return `${TG_SITE}/?join=${encodeURIComponent(code)}`;
 }
 
 // [BUG FIX] Escapes the handful of characters that are special in
@@ -13190,8 +13193,8 @@ io.on("connection", (socket) => {
     room.players[socket.id].pingMs = Math.round(Math.min(ms, 9999));
   });
 
-  socket.on("disconnect", () => {
-    console.log("Player disconnected:", socket.id);
+  socket.on("disconnect", (reason) => {
+    console.log("Player disconnected:", socket.id, reason); // [RECONNECT DEBUG] e.g. "transport close" / "ping timeout"
     if (dropWatcherIfAny(socket)) return; // [WATCH LIVE] a watcher just leaves - no grace period, no host change
 
     // [NEW FEATURE - PRIVATE ROOM JOIN REQUESTS] A requester isn't
