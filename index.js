@@ -11831,30 +11831,6 @@ io.on("connection", (socket) => {
     });
     broadcastRoomLeaderboard(room);
 
-    // [BUG FIX] A player who disconnected mid-game (see the disconnect
-    // handler's grace period) but hadn't yet had their grace period
-    // expire when the round ENDED was previously left sitting in
-    // room.players indefinitely - they'd show up as a stale "ghost"
-    // entry in the Lobby's player list (still showing their old name/
-    // avatar) even though they're not actually connected, since nothing
-    // ever cleaned them up once the game that grace period was
-    // protecting had already concluded. Once we're back in the Lobby,
-    // that protection no longer serves any purpose - remove them now,
-    // the same way the grace-timeout path itself would eventually have.
-    Object.keys(room.players).forEach((id) => {
-      if (room.players[id].disconnectedAt) {
-        const wasHost = room.players[id].isHost;
-        delete room.players[id];
-        if (wasHost) {
-          const remaining = Object.keys(room.players);
-          if (remaining.length > 0) {
-            room.players[remaining[0]].isHost = true;
-            console.log(`Host migrated to ${remaining[0]} in room ${roomCode} (stale disconnect cleared on Lobby return)`);
-          }
-        }
-      }
-    });
-
     // [NEW FEATURE] Public room is joinable again - reuses the same
     // Telegram message (no spam). Fire-and-forget.
     postOrUpdateRoomMessage(room);
