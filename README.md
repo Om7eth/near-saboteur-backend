@@ -10,6 +10,12 @@ Node / Express / Socket.io server for NEAR Saboteur, plus the pool escrow contra
 - **AI tools:** much of the code was written with the help of Claude (Claude Code), directed, reviewed and tested by the founder.
 - **License:** MIT, see [LICENSE](LICENSE).
 
+### Also in this backend (hackathon work)
+- **Telegram bot** (`/telegram-webhook`): one auto-updating banner post per public room, commands `/play /rooms /live /ranks /help /subscribe /unsubscribe`, weekly-prize announcements. Off unless `TELEGRAM_PAUSED=0`. Topics: `TELEGRAM_TOPIC_ID` (rooms, default 349), `TELEGRAM_ANNOUNCE_TOPIC_ID` (default 4).
+- **Referrals** (`GET /referrals`): reward unlocks after 3 matches with 2+ real players; 1,000 $SABOTEUR (testnet) + 30 points, max 5 friends a week for points.
+- **Watch Live** (`watchRoom` socket event, `GET /watch/rooms`, admin `POST /admin/watch-live`): silent spectators for public Free/Pool rooms, never Paid.
+- **Custom character requests**: paid in real NEAR to `saboteur.near`, verified on mainnet.
+
 ## Pool Games
 
 A pool game is a prize pool that one player (the **host**) puts up for a room. The host can host it for their own community and doesn't have to play.
