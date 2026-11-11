@@ -475,6 +475,15 @@ const matchRecordSchema = new mongoose.Schema({
   earnedAt: { type: Date, default: Date.now, index: true },
 });
 const MatchRecord = mongoose.model("MatchRecord", matchRecordSchema);
+// [ADMIN - BOT MATCHES] Bots have no account, so they never get a
+// MatchRecord. This keeps one row per bot per match ONLY for the admin
+// match history, so bot matches (and rooms played only with bots) show
+// up there too. Never used for points, ranks, rewards or leaderboards.
+const BotMatchRecord = mongoose.model("BotMatchRecord", new mongoose.Schema({
+  botId: String, playerName: String, roomCode: String, roomSessionId: { type: String, default: null, index: true },
+  matchId: { type: String, index: true }, role: String, won: Boolean, survived: Boolean, points: Number,
+  missionsDone: Number, killsCount: Number, gameMode: String, earnedAt: { type: Date, default: Date.now, index: true },
+}));
 
 // [NEW FEATURE - FUNDS SAFETY: PERSISTENT POOL TRACKING] Every other
 // piece of pool state (room.pool) lives ONLY in the in-memory `rooms`
@@ -5372,6 +5381,7 @@ app.get("/admin/saboteur", requireAdmin, async (req, res) => {
 app.get("/admin/live-rooms", requireAdmin, (req, res) => {
   const list = Object.values(rooms).map((r) => ({
     code: r.code,
+    botCount: Object.values(r.players).filter((rp) => rp.isBot).length, // [ADMIN - BOT MATCHES]
     playerCount: Object.values(r.players).filter((rp) => !rp.spectator).length, // [WATCH MODE] a watching host is not a player
     gameStarted: !!r.gameStarted,
     winner: r.winner || null,
@@ -5393,7 +5403,8 @@ app.get("/admin/live-rooms/:code", requireAdmin, (req, res) => {
     id,
     name: p.name,
     accountEmail: p.accountEmail || null,
-    isGuest: !p.accountId,
+    isBot: !!p.isBot, // [ADMIN - BOT MATCHES]
+    isGuest: !p.accountId && !p.isBot,
     avatarId: p.avatarId,
     isHost: !!p.isHost,
     role: p.role || null,
@@ -7102,7 +7113,9 @@ app.get("/admin/rooms", requireAdmin, async (req, res) => {
     // when present, "legacy:<roomCode>" otherwise.
     const groupKeyExpr = { $ifNull: ["$roomSessionId", { $concat: ["legacy:", "$roomCode"] }] };
 
+    const withBots = [{ $project: { roomSessionId: 1, roomCode: 1, earnedAt: 1 } }, { $unionWith: { coll: BotMatchRecord.collection.name, pipeline: [{ $project: { roomSessionId: 1, roomCode: 1, earnedAt: 1 } }] } }]; // [ADMIN - BOT MATCHES]
     const sessionsSorted = await MatchRecord.aggregate([
+      ...withBots,
       { $match: baseFilter },
       { $group: { _id: groupKeyExpr, latest: { $max: "$earnedAt" } } },
       { $sort: { latest: -1 } },
@@ -7111,7 +7124,7 @@ app.get("/admin/rooms", requireAdmin, async (req, res) => {
     ]);
     const groupKeys = sessionsSorted.map((s) => s._id);
     const totalAgg = await MatchRecord.aggregate([
-      { $match: baseFilter }, { $group: { _id: groupKeyExpr } }, { $count: "total" },
+      ...withBots, { $match: baseFilter }, { $group: { _id: groupKeyExpr } }, { $count: "total" },
     ]);
     const total = totalAgg[0]?.total || 0;
 
@@ -7121,12 +7134,17 @@ app.get("/admin/rooms", requireAdmin, async (req, res) => {
     // anywhere, it only exists as this endpoint's own fallback).
     const realSessionIds = groupKeys.filter((k) => !k.startsWith("legacy:"));
     const legacyRoomCodes = groupKeys.filter((k) => k.startsWith("legacy:")).map((k) => k.slice("legacy:".length));
-    const records = await MatchRecord.find({
+    const sessQ = {
       $or: [
         ...(realSessionIds.length ? [{ roomSessionId: { $in: realSessionIds } }] : []),
         ...(legacyRoomCodes.length ? [{ roomSessionId: null, roomCode: { $in: legacyRoomCodes } }] : []),
       ],
-    }).sort({ earnedAt: 1 }).lean();
+    };
+    const [humanRecs, botRecs] = groupKeys.length ? await Promise.all([
+      MatchRecord.find(sessQ).sort({ earnedAt: 1 }).lean(),
+      BotMatchRecord.find(sessQ).lean(), // [ADMIN - BOT MATCHES]
+    ]) : [[], []];
+    const records = [...humanRecs, ...botRecs.map((b) => ({ ...b, isBot: true, playerId: b.botId }))].sort((a, b) => new Date(a.earnedAt) - new Date(b.earnedAt));
     const bySession = {};
     for (const r of records) {
       const key = r.roomSessionId || `legacy:${r.roomCode}`;
@@ -7138,14 +7156,14 @@ app.get("/admin/rooms", requireAdmin, async (req, res) => {
           // back to the best guess isPoolGame alone can offer (can't
           // distinguish Pool vs Paid for those - shown as "Pool/Paid").
           gameMode: r.gameMode || (r.isPoolGame ? null : "free"),
-          players: new Set(), matchIds: new Set(), earliestAt: r.earnedAt, latestAt: r.earnedAt,
+          players: new Set(), bots: new Set(), matchIds: new Set(), earliestAt: r.earnedAt, latestAt: r.earnedAt,
           // [NEW FEATURE] Flags a legacy-grouped room so the frontend can
           // show a small note explaining why it has no real session id.
           isLegacyGrouping: !r.roomSessionId,
         };
       }
       const s = bySession[key];
-      s.players.add(String(r.playerId));
+      if (r.isBot) s.bots.add(String(r.playerName || r.playerId)); else s.players.add(String(r.playerId));
       s.matchIds.add(r.matchId);
       // A room can have matches from before gameMode existed mixed with
       // ones after (if this room stayed open across that change) -
@@ -7158,7 +7176,7 @@ app.get("/admin/rooms", requireAdmin, async (req, res) => {
       .map((s) => ({
         roomSessionId: s.roomSessionId, roomCode: s.roomCode, isPoolGame: s.isPoolGame, poolName: s.poolName,
         gameMode: s.gameMode || (s.isPoolGame ? "pool_or_paid" : "free"),
-        playerCount: s.players.size, matchCount: s.matchIds.size, earliestAt: s.earliestAt, latestAt: s.latestAt,
+        playerCount: s.players.size, botCount: s.bots.size, matchCount: s.matchIds.size, earliestAt: s.earliestAt, latestAt: s.latestAt,
         isLegacyGrouping: s.isLegacyGrouping,
       }))
       .sort((a, b) => new Date(b.latestAt) - new Date(a.latestAt));
@@ -7178,7 +7196,9 @@ app.get("/admin/rooms/:sessionId", requireAdmin, async (req, res) => {
     const query = sessionId.startsWith("legacy:")
       ? { roomSessionId: null, roomCode: sessionId.slice("legacy:".length) }
       : { roomSessionId: sessionId };
-    const matches = await MatchRecord.find(query).sort({ earnedAt: 1 }).lean();
+    const [humanMatches, botMatches] = await Promise.all([MatchRecord.find(query).lean(), BotMatchRecord.find(query).lean()]);
+    // [ADMIN - BOT MATCHES] bot rows are display-only (no pool fields, so pool summary below ignores them)
+    const matches = [...humanMatches, ...botMatches.map((b) => ({ ...b, isBot: true, playerId: b.botId }))].sort((a, b) => new Date(a.earnedAt) - new Date(b.earnedAt));
 
     // [NEW FEATURE - FINAL POOL LEADERBOARD] For a Pool/Paid room, the
     // per-match points table alone doesn't show what actually got PAID
@@ -8230,6 +8250,17 @@ function computeMatchPoints(player, winner) {
 // everyone, so waiting until then to compute results would silently
 // give every later returner a wrong (or missing) answer.
 function stagePendingPointsForRoom(room) {
+  // [ADMIN - BOT MATCHES] admin-history-only rows for the bots (fire and forget)
+  try {
+    const botRows = Object.entries(room.players).filter(([, p]) => p.isBot && !p.spectator).map(([id, p]) => ({
+      botId: id, playerName: p.name || "Bot", roomCode: room.code || "", roomSessionId: room.sessionId || null,
+      matchId: room.currentMatchId || "", role: p.role || "", won: p.role === room.winner, survived: !!p.alive,
+      points: Math.max(0, computeMatchPoints(p, room.winner) || 0),
+      missionsDone: p.missionsDone || 0, killsCount: p.killsCount || 0,
+      gameMode: room.gameMode || (room.pool ? (room.pool.hostFunded ? "pool" : "paid") : "free"),
+    }));
+    if (botRows.length && MONGODB_URI) BotMatchRecord.insertMany(botRows).catch((e) => console.warn("[ADMIN] bot match rows failed:", e.message));
+  } catch (e) { console.warn("[ADMIN] bot match rows skipped:", e.message); }
   Object.entries(room.players).forEach(([pid, p]) => {
     if (!p.accountId) { p.pendingPoints = 0; return; } // guest - never staged, never committed
     // [$SABOTEUR] + backed-vote results (right +5 / wrong -5), never below 0
