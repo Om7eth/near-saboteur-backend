@@ -7487,8 +7487,18 @@ const TELEGRAM_API = TELEGRAM_BOT_TOKEN ? `https://api.telegram.org/bot${TELEGRA
 // Low-level helper - every Telegram Bot API call goes through this.
 // Never throws; returns null on any failure (missing token, network
 // error, or Telegram-side error) and just logs a warning.
+// [TELEGRAM v2] Every bot card also carries a "Join the group" button, so a
+// forwarded/shared card always lets people join the official group.
+const TELEGRAM_GROUP_URL = process.env.TELEGRAM_GROUP_URL || "https://t.me/nearsaboteur";
+function withJoinButton(payload) {
+  const kb = payload && payload.reply_markup && payload.reply_markup.inline_keyboard;
+  if (!Array.isArray(kb)) return payload;
+  if (kb.some((row) => row.some((b) => b && b.url === TELEGRAM_GROUP_URL))) return payload;
+  return { ...payload, reply_markup: { ...payload.reply_markup, inline_keyboard: [...kb, [{ text: "💬 Join the NEAR Saboteur group", url: TELEGRAM_GROUP_URL }]] } };
+}
 async function tgCall(method, payload) {
   if (!TELEGRAM_API) return null;
+  if (/^(sendMessage|sendPhoto|editMessageText|editMessageCaption|editMessageMedia|editMessageReplyMarkup)$/.test(method)) payload = withJoinButton(payload);
   try {
     const res = await fetch(`${TELEGRAM_API}/${method}`, {
       method: "POST",
@@ -7725,7 +7735,7 @@ const tgPairs = (btns) => { const rows = []; for (let i = 0; i < btns.length; i 
 async function tgReply(chatId, threadId, { text, photoKind, keyboard }) {
   const payload = { chat_id: chatId, parse_mode: "HTML" };
   if (threadId) payload.message_thread_id = threadId;
-  if (keyboard) payload.reply_markup = keyboard;
+  payload.reply_markup = keyboard || { inline_keyboard: [] };
   const photo = photoKind ? tgBannerUrl(photoKind) : null;
   if (photo) return tgCall("sendPhoto", { ...payload, photo, caption: text });
   return tgCall("sendMessage", { ...payload, text, link_preview_options: { is_disabled: true } });
