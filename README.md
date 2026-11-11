@@ -1,6 +1,14 @@
 # NEAR Saboteur — backend
 
-Node / Express / Socket.io server for NEAR Saboteur.
+Node / Express / Socket.io server for NEAR Saboteur, plus the pool escrow contract (`contract/`, Rust).
+
+**NEAR Hackathon (Games With Real Economies):** the main submission README, with the feature list and prior-work disclosure, is in the frontend repo: https://github.com/Om7eth/near-saboteur-frontend
+
+- **Live game:** https://nearsaboteur.com
+- **Baseline before the hackathon:** commit [`25b6b99`](https://github.com/Om7eth/near-saboteur-backend/commit/25b6b99) (6 Oct 2026), tagged `pre-hackathon`.
+- **Hackathon work:** [compare `pre-hackathon...hackathon-submission`](https://github.com/Om7eth/near-saboteur-backend/compare/pre-hackathon...hackathon-submission)
+- **AI tools:** much of the code was written with the help of Claude (Claude Code), directed, reviewed and tested by the founder.
+- **License:** MIT, see [LICENSE](LICENSE).
 
 ## Pool Games
 
