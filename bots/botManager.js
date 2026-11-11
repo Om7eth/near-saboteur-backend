@@ -70,7 +70,7 @@ function botIds(room) {
   return Object.keys(room.players).filter((id) => room.players[id].isBot);
 }
 function humanIds(room) {
-  return Object.keys(room.players).filter((id) => !room.players[id].isBot);
+  return Object.keys(room.players).filter((id) => !room.players[id].isBot && !room.players[id].watcher); // [WATCH LIVE] a public watcher never keeps a room alive or becomes host
 }
 
 function rand(min, max) {

@@ -176,6 +176,13 @@ const playerSchema = new mongoose.Schema({
   // explicit partial index that only enforces uniqueness among actual
   // string usernames - see playerSchema.index() call after the schema.
   username: { type: String, default: null, lowercase: true, trim: true },
+  // [REFERRALS] who invited this player (set once, at sign-up) and when
+  // the inviter's reward unlocked (after REFERRAL.matches qualifying matches)
+  referredBy: { type: mongoose.Schema.Types.ObjectId, default: null, index: true },
+  referredAt: { type: Date, default: null },
+  referralMatches: { type: Number, default: 0 },
+  referralRewardedAt: { type: Date, default: null },
+  referralRankPoints: { type: Number, default: 0 }, // 30, or 0 when the inviter was over the weekly cap
   avatarId: { type: String, default: "" },
   // Filled in during wallet choice.
   walletType: { type: String, default: "none" }, // 'none' | 'connected' | 'ingame'
@@ -1709,7 +1716,7 @@ function scheduleRoomEmptyClose(roomCode) {
     delete roomAutoCloseTimers[roomCode];
     const room = rooms[roomCode];
     if (!room) return;
-    if (Object.keys(room.players).length > 0) return; // someone came back - stay open
+    if (Object.values(room.players).some((p) => !p.watcher)) return; // someone came back - stay open ([WATCH LIVE] watchers don't count)
     if (room.pool && room.pool.mode === "manual") { await finishPoolEarly(room, "room empty for 3 minutes"); }
     else if (room.pool && room.pool.state === "Locked" && (room.pool.matchesPlayed || 0) >= 1) { await finishPoolEarly(room, "room empty for 3 minutes"); }
     else if (room.pool && poolIsCancellable(room.pool) && (room.pool.onChainParticipantAccountIds || []).length > 0) {
@@ -2265,6 +2272,7 @@ app.post("/auth/signup", async (req, res) => {
       player = await Player.create({
         email,
         passwordHash,
+        ...(await referralFieldsFor(req.body.ref)),
         verified: false,
         otpCode,
         otpExpiresAt,
@@ -2409,6 +2417,7 @@ app.post("/auth/wallet-verify", async (req, res) => {
       const hasLegionBadge = await checkLegionInitiateSbt(accountId);
       player = await Player.create({
         verifiedWalletAddress: accountId,
+        ...(await referralFieldsFor(req.body.ref)),
         verified: true, // a signed wallet proof IS the verification - no separate OTP step needed
         hasLegionBadge,
         legionBadgeCheckedAt: new Date(),
@@ -3676,9 +3685,10 @@ app.get("/custom-avatar-request/config", async (req, res) => {
       enabled: config.enabled,
       priceNear: config.priceNear,
       telegramLink: config.telegramLink || null,
-      // [NEW FEATURE] Same receiving wallet as Play Pass - the frontend
-      // needs this to actually send the payment to.
-      receivingAccountId: PLAY_PASS_RECEIVING_ACCOUNT_ID,
+      // [CUSTOM AVATAR - REAL NEAR] Paid like Play Pass: real NEAR on
+      // mainnet from the player's own wallet straight to saboteur.near.
+      receivingAccountId: PLAY_PASS_MAINNET_RECEIVER,
+      network: "mainnet",
     });
   } catch (err) {
     console.error("[CUSTOM AVATAR REQUEST] /custom-avatar-request/config error:", err.message);
@@ -3700,9 +3710,6 @@ app.post("/custom-avatar-request/submit", async (req, res) => {
   try {
     const player = await findActingPlayer(req);
     if (!player) return res.status(404).json({ message: "Account not found." });
-    if (player.walletType !== "ingame" || !player.walletAddress) {
-      return res.status(400).json({ message: "You need an in-game wallet set up to request a custom character." });
-    }
     const config = await getCustomAvatarRequestConfig();
     if (!config.enabled) return res.status(403).json({ message: "Custom character requests aren't open right now." });
 
@@ -3725,19 +3732,29 @@ app.post("/custom-avatar-request/submit", async (req, res) => {
       return res.status(400).json({ message: "Image is too large (max 1MB)." });
     }
 
+    // [CUSTOM AVATAR - REAL NEAR] Same checks as Play Pass on mainnet:
+    // the paying wallet must be proven to belong to this account, the
+    // transfer must have succeeded, gone to saboteur.near, be enough, and
+    // never have been used before (for this or for Play Pass).
     const txHash = String(req.body.txHash || "").trim();
-    if (!txHash) return res.status(400).json({ message: "Missing payment transaction hash." });
+    const payer = String(req.body.payerAccountId || "").trim().toLowerCase();
+    if (!/^[1-9A-HJ-NP-Za-km-z]{43,44}$/.test(txHash)) return res.status(400).json({ message: "Missing or invalid payment transaction hash." });
+    if (!payer) return res.status(400).json({ message: "Missing the wallet that paid." });
+    if (!player.playPassPayerWallet || player.playPassPayerWallet !== payer) return res.status(403).json({ message: "Confirm this wallet is yours first (sign the message in your wallet), then try again." });
+    if (await CustomAvatarRequest.exists({ paymentTxHash: txHash })) return res.status(409).json({ message: "That payment was already used for a request." });
+    if (await PlayPassPurchase.exists({ txHash })) return res.status(409).json({ message: "That payment was already used for Play Pass." });
+    const tx = await readMainnetTransfer(txHash, payer);
+    if (!tx.ok) return res.status(502).json({ message: tx.error || "Could not read the payment yet - please wait a few seconds." });
+    if (!tx.succeeded) return res.status(400).json({ message: "That transaction failed on-chain, so no NEAR was sent." });
+    if (tx.signer !== payer) return res.status(400).json({ message: "That transaction wasn't sent from your wallet." });
+    if (tx.receiver !== PLAY_PASS_MAINNET_RECEIVER) return res.status(400).json({ message: `That transaction didn't send NEAR to ${PLAY_PASS_MAINNET_RECEIVER}.` });
     const nearAPI = await loadNearAPI();
-    const minYocto = nearAPI.nearToYocto(String(config.priceNear));
-    const verification = await verifyPlayPassTransfer(txHash, player.walletAddress, minYocto);
-    if (!verification.ok) {
-      return res.status(400).json({ message: verification.error || "Could not verify your payment." });
-    }
+    if (tx.yocto < BigInt(nearAPI.nearToYocto(String(config.priceNear)))) return res.status(400).json({ message: `The price is ${config.priceNear} NEAR - that payment was less. Contact us from the Inbox for a refund.` });
 
     const request = await CustomAvatarRequest.create({
       playerId: player._id,
       playerName: player.name || player.username || "Player",
-      walletAddress: player.walletAddress,
+      walletAddress: payer,
       telegramUsername,
       description,
       imageBase64,
@@ -4069,6 +4086,138 @@ app.post("/pools/manual/:poolId/paid", async (req, res) => {
 // [POOL v2 - UNPAID REMINDER] The home page asks this for the signed-in host:
 // their FINISHED Real-NEAR pools that still have a winner to pay. Only winners
 // with a wallet count (the host can't pay one without a wallet yet).
+// ============================================================
+// [WATCH LIVE] Anyone can watch a public FREE or POOL match as a silent
+// spectator (never PAID). Watchers see what a crewmate sees (no roles),
+// can't chat or vote, never count as players, and leave when the room
+// closes. Switched on/off from the admin page (default OFF).
+// ============================================================
+const AppSetting = mongoose.models.AppSetting || mongoose.model("AppSetting", new mongoose.Schema({ key: { type: String, unique: true }, value: mongoose.Schema.Types.Mixed, updatedAt: Date }));
+let watchLiveEnabled = false;
+const MAX_WATCHERS_PER_ROOM = 25;
+async function loadWatchLiveSetting() {
+  if (!MONGODB_URI) return;
+  try { const d = await AppSetting.findOne({ key: "watchLive" }).lean(); watchLiveEnabled = !!(d && d.value && d.value.enabled); } catch (e) { /* keep default */ }
+}
+function watchLiveAllowed(room) {
+  return !!(watchLiveEnabled && room && room.isPublic && !room.devMode && getRoomGameMode(room) !== "paid");
+}
+function dropWatcherIfAny(socket) {
+  const room = rooms[socket.data && socket.data.roomCode];
+  if (!room || !room.players[socket.id] || !room.players[socket.id].watcher) return false;
+  delete room.players[socket.id];
+  socket.leave(room.code);
+  socket.data.roomCode = null; socket.data.playerToken = null;
+  io.to(room.code).emit("playerListUpdated", { players: getPlayerList(room.code) });
+  return true;
+}
+function isWatcherSocket(socket) {
+  const room = rooms[socket.data && socket.data.roomCode];
+  return !!(room && room.players[socket.id] && room.players[socket.id].watcher);
+}
+function evictWatchers(room, message) {
+  for (const [id, p] of Object.entries(room.players || {})) {
+    if (!p.watcher) continue;
+    io.to(id).emit("watchEnded", { message: message || "This match is no longer available to watch." });
+    const s = io.sockets.sockets.get(id);
+    if (s) { s.leave(room.code); s.data.roomCode = null; s.data.playerToken = null; }
+    delete room.players[id];
+  }
+}
+app.get("/watch/config", (req, res) => res.json({ enabled: watchLiveEnabled }));
+app.get("/watch/rooms", (req, res) => {
+  if (!watchLiveEnabled) return res.json({ enabled: false, rooms: [] });
+  const list = Object.values(rooms).filter(watchLiveAllowed).map((r) => {
+    const all = Object.values(r.players);
+    const players = all.filter((p) => !p.spectator);
+    const host = all.find((p) => p.isHost);
+    return {
+      code: r.code, mode: getRoomGameMode(r), poolName: (r.pool && r.pool.poolName) || null,
+      prizeNear: r.pool ? (r.pool.mode === "manual" ? Number(r.pool.prizeNear || 0) : Number(r.pool.entryFeeNear || 0)) : 0, realNear: !!(r.pool && r.pool.mode === "manual"),
+      host: host ? host.name : null, players: players.length, bots: players.filter((p) => p.isBot).length,
+      alive: players.filter((p) => p.alive !== false).length, live: !!r.gameStarted,
+      match: ((r.pool && r.pool.matchesPlayed) || r.matchesPlayed || 0) + (r.gameStarted ? 1 : 0), maxMatches: (r.pool && r.pool.maxMatches) || r.matchLimit || null,
+      watchers: all.filter((p) => p.watcher).length,
+    };
+  }).sort((a, b) => (b.live - a.live) || (b.players - a.players)).slice(0, 30);
+  res.json({ enabled: true, rooms: list });
+});
+app.get("/admin/watch-live", requireAdmin, (req, res) => res.json({ enabled: watchLiveEnabled, watchers: Object.values(rooms).reduce((n, r) => n + Object.values(r.players).filter((p) => p.watcher).length, 0) }));
+app.post("/admin/watch-live", requireAdmin, requireFullAdmin, async (req, res) => {
+  watchLiveEnabled = !!req.body.enabled;
+  try { await AppSetting.updateOne({ key: "watchLive" }, { $set: { key: "watchLive", value: { enabled: watchLiveEnabled }, updatedAt: new Date() } }, { upsert: true }); } catch (e) { /* in-memory still applies */ }
+  if (!watchLiveEnabled) for (const r of Object.values(rooms)) evictWatchers(r, "Watching has been switched off.");
+  for (const r of Object.values(rooms)) if (r.isPublic) postOrUpdateRoomMessage(r); // refresh the Watch buttons on Telegram
+  logAdminAction("watch-live", { enabled: watchLiveEnabled });
+  res.json({ enabled: watchLiveEnabled });
+});
+
+// ============================================================
+// [REFERRALS] Invite link = nearsaboteur.com/?ref=<username>. A friend who
+// signs up with it and then finishes REFERRAL.matches matches with at
+// least REFERRAL.minHumans real players unlocks the inviter's reward:
+// 1,000 $SABOTEUR (testnet, no value) + 30 points. Only the first
+// REFERRAL.weeklyCap friends per week add points to the weekly Ranks.
+// ============================================================
+const REFERRAL = { matches: 3, minHumans: 2, tokens: 1000, points: 30, weeklyCap: 5 };
+async function findReferrer(ref) {
+  const r = String(ref || "").trim().toLowerCase().replace(/^@/, "").slice(0, 64);
+  if (!r) return null;
+  if (/^[a-f0-9]{24}$/.test(r)) return Player.findById(r, "_id").catch(() => null);
+  return Player.findOne({ username: r }, "_id").catch(() => null);
+}
+async function referralFieldsFor(ref) {
+  try { const p = await findReferrer(ref); return p ? { referredBy: p._id, referredAt: new Date() } : {}; } catch { return {}; }
+}
+async function referralMatchDone(player, meta) {
+  if (!MONGODB_URI || (meta.humans || 0) < REFERRAL.minHumans) return;
+  if (String(player.referredBy) === String(player._id)) return;
+  const doc = await Player.findOneAndUpdate({ _id: player._id, referralRewardedAt: null }, { $inc: { referralMatches: 1 } }, { new: true });
+  if (!doc || doc.referralMatches < REFERRAL.matches) return;
+  const claimed = await Player.updateOne({ _id: doc._id, referralRewardedAt: null }, { $set: { referralRewardedAt: new Date() } });
+  if (!claimed.modifiedCount) return; // someone else already unlocked it
+  const referrer = await Player.findById(doc.referredBy);
+  if (!referrer) return;
+  const weekStart = getCurrentWeekStartUTC();
+  const already = await Player.countDocuments({ referredBy: referrer._id, referralRewardedAt: { $gte: weekStart }, referralRankPoints: { $gt: 0 } });
+  const givePoints = already < REFERRAL.weeklyCap;
+  if (givePoints) {
+    if (!referrer.seasonWeekStart || referrer.seasonWeekStart.getTime() < weekStart.getTime()) { referrer.currentSeasonPoints = 0; referrer.seasonWeekStart = weekStart; }
+    referrer.totalPoints += REFERRAL.points;
+    referrer.currentSeasonPoints += REFERRAL.points;
+    await referrer.save();
+    await Player.updateOne({ _id: doc._id }, { $set: { referralRankPoints: REFERRAL.points } });
+    await MatchRecord.create({ playerId: referrer._id, playerName: referrer.name || "", roomCode: "", matchId: `referral:${doc._id}`, role: "referral", won: false, points: REFERRAL.points, rawPoints: REFERRAL.points }).catch((e) => console.warn("[REFERRAL] record failed:", e.message));
+  }
+  economy.payReferral({ referrerId: referrer._id, name: referrer.name, friendId: doc._id, amount: REFERRAL.tokens }).catch((e) => console.warn("[REFERRAL] token failed:", e.message));
+  const friend = doc.name || doc.username || "Your friend";
+  sendInboxMessage(referrer._id, {
+    title: `🔓 Referral reward unlocked · ${friend}`,
+    body: `${friend} finished ${REFERRAL.matches} matches.\nYou get ${REFERRAL.tokens.toLocaleString()} $SABOTEUR${givePoints ? ` + ${REFERRAL.points} points` : " (this week's 5-friend points limit is reached, so no extra points)"}.\n$SABOTEUR is a testnet token with no value and nothing is promised about the future.`,
+  });
+  console.log(`[REFERRAL] ${referrer._id} unlocked by ${doc._id} (points: ${givePoints})`);
+}
+app.get("/referrals", async (req, res) => {
+  try {
+    const account = await resolveAccountFromToken(req.query.sessionToken);
+    if (!account) return res.status(401).json({ message: "Sign in to see your referrals." });
+    const me = await Player.findById(account.accountId, "username");
+    const code = (me && me.username) || String(account.accountId);
+    const friends = await Player.find({ referredBy: account.accountId }, "name username avatarId referredAt referralMatches referralRewardedAt referralRankPoints").sort({ referredAt: -1 }).limit(200).lean();
+    const weekStart = getCurrentWeekStartUTC();
+    const weekCount = friends.filter((f) => f.referralRewardedAt && f.referralRewardedAt >= weekStart && f.referralRankPoints > 0).length;
+    const rewarded = friends.filter((f) => f.referralRewardedAt);
+    res.json({
+      code, rules: REFERRAL, weekCount, weekResetsAt: new Date(weekStart.getTime() + 7 * 864e5),
+      invited: friends.length, locked: friends.length - rewarded.length, qualified: rewarded.length,
+      tokensEarned: rewarded.length * REFERRAL.tokens, pointsEarned: friends.reduce((s, f) => s + (f.referralRankPoints || 0), 0),
+      friends: friends.map((f) => ({ name: f.name || f.username || "Player", username: f.username || null, avatarId: f.avatarId || "", joinedAt: f.referredAt, matches: Math.min(REFERRAL.matches, f.referralMatches || 0), rewarded: !!f.referralRewardedAt, rankPoints: f.referralRankPoints || 0 })),
+    });
+  } catch (e) {
+    res.status(500).json({ message: "Could not load referrals." });
+  }
+});
+
 app.get("/pools/host-unpaid", async (req, res) => {
   try {
     const account = await resolveAccountFromToken(req.query.sessionToken);
@@ -7338,8 +7487,18 @@ const TELEGRAM_API = TELEGRAM_BOT_TOKEN ? `https://api.telegram.org/bot${TELEGRA
 // Low-level helper - every Telegram Bot API call goes through this.
 // Never throws; returns null on any failure (missing token, network
 // error, or Telegram-side error) and just logs a warning.
+// [TELEGRAM v2] Every bot card also carries a "Join the group" button, so a
+// forwarded/shared card always lets people join the official group.
+const TELEGRAM_GROUP_URL = process.env.TELEGRAM_GROUP_URL || "https://t.me/nearsaboteur";
+function withJoinButton(payload) {
+  const kb = payload && payload.reply_markup && payload.reply_markup.inline_keyboard;
+  if (!Array.isArray(kb)) return payload;
+  if (kb.some((row) => row.some((b) => b && b.url === TELEGRAM_GROUP_URL))) return payload;
+  return { ...payload, reply_markup: { ...payload.reply_markup, inline_keyboard: [...kb, [{ text: "💬 Join the NEAR Saboteur group", url: TELEGRAM_GROUP_URL }]] } };
+}
 async function tgCall(method, payload) {
   if (!TELEGRAM_API) return null;
+  if (/^(sendMessage|sendPhoto|editMessageText|editMessageCaption|editMessageMedia|editMessageReplyMarkup)$/.test(method)) payload = withJoinButton(payload);
   try {
     const res = await fetch(`${TELEGRAM_API}/${method}`, {
       method: "POST",
@@ -7375,158 +7534,322 @@ function escapeTelegramHtml(str) {
 // single source of truth for what the message should look like at any
 // given moment, so every caller (create, toggle, start, reset, close)
 // just calls postOrUpdateRoomMessage and this figures out the rest.
-function telegramRoomStatusMessage(room) {
-  const count = Object.keys(room.players).length;
-  const code = escapeTelegramHtml(room.code);
-
-  if (!room.isPublic) {
-    return {
-      text: `🔒 Room <code>${code}</code> — made private by the host. Not joinable from here anymore.`,
-      keyboard: { inline_keyboard: [] },
-    };
-  }
-  if (room.gameStarted) {
-    return {
-      text: `🔴 Room <code>${code}</code> — game in progress. Not joinable right now.`,
-      keyboard: { inline_keyboard: [] },
-    };
-  }
-  return {
-    // [NEW FEATURE] <code> renders as tap-to-copy monospace in
-    // Telegram - tapping the room code itself copies it, no need to
-    // select/long-press text manually.
-    text: `🟢 Room <code>${code}</code> is open!\n👥 ${count} player(s) waiting\n\nTap below to join 👇`,
-    keyboard: {
-      inline_keyboard: [[{ text: "▶️ Join Room", url: telegramRoomJoinUrl(room.code) }]],
-    },
-  };
+// [TELEGRAM v2] Each public room gets ONE photo post (a random banner
+// for its mode) with a rich caption. The same message is edited as the
+// room changes (lobby -> live -> finished), so the group never gets
+// spam. Only URL buttons are used: Telegram keeps URL buttons when a
+// message is forwarded (callback buttons would be dropped).
+const TG_SITE = (process.env.FRONTEND_PUBLIC_URL || "https://nearsaboteur.com").replace(/\/$/, "");
+const TG_BANNERS = { free: 4, pool: 4, paid: 4, live: 2, over: 1, weekly: 1 };
+function tgBannerUrl(kind) {
+  const base = (process.env.BACKEND_PUBLIC_URL || process.env.RENDER_EXTERNAL_URL || "").replace(/\/$/, "");
+  if (!base) return null;
+  const n = 1 + Math.floor(Math.random() * (TG_BANNERS[kind] || 1));
+  return `${base}/public/tg/${kind}-${n}.jpg`;
 }
+const tgNum = (n) => String(Math.round(Number(n || 0) * 1000) / 1000);
+function tgSeatBar(n, max = 10) { const k = Math.max(0, Math.min(max, n)); return "▰".repeat(k) + "▱".repeat(max - k); }
+function tgRoomPeople(room) {
+  const list = Object.values(room.players || {});
+  const players = list.filter((p) => !p.spectator);
+  return { players, humans: players.filter((p) => !p.isBot).length, bots: players.filter((p) => p.isBot).length, host: list.find((p) => p.isHost) };
+}
+function tgTop3(room) {
+  const lb = getRoomLeaderboardList(room).filter((e) => e.totalPoints > 0).slice(0, 3);
+  const medal = ["🥇", "🥈", "🥉"];
+  return lb.map((e, i) => `${medal[i]} <b>${escapeTelegramHtml(e.name || e.username || "Player")}</b> — ${e.totalPoints} pts`).join("\n");
+}
+function tgHeader(room) {
+  const mode = getRoomGameMode(room);
+  const code = `<code>${escapeTelegramHtml(room.code)}</code>`;
+  const poolName = room.pool && room.pool.poolName ? ` · <b>${escapeTelegramHtml(room.pool.poolName)}</b>` : "";
+  if (mode === "pool") return `🏆 <b>POOL GAME</b>${poolName}\nRoom ${code}`;
+  if (mode === "paid") return `💸 <b>PAID GAME</b>${poolName} · Room ${code} · <i>testnet</i>`;
+  return `🟢 <b>FREE PLAY</b> · Room ${code}`;
+}
+function tgPrizeLines(room) {
+  const mode = getRoomGameMode(room); const pool = room.pool || {};
+  if (mode === "pool") {
+    if (pool.mode === "manual") {
+      const prize = Number(pool.prizeNear || 0);
+      const split = Array.isArray(pool.split) && pool.split.length ? `\n${pool.split.slice(0, 3).map((pct, i) => `${["🥇", "🥈", "🥉"][i]} ${tgNum(prize * pct / 100)}`).join(" · ")} NEAR` : "";
+      return `💰 Prize: <b>${tgNum(prize)} NEAR</b> · real NEAR, paid by the host${split}`;
+    }
+    return `💰 Prize: <b>${tgNum(pool.entryFeeNear)} tNEAR</b> · testnet, paid by the contract`;
+  }
+  if (mode === "paid") {
+    const n = (pool.participantAccountIds || []).length;
+    return `🎟 Entry: <b>${tgNum(pool.entryFeeNear)} tNEAR</b> each\n🏦 Pot now: <b>${tgNum(n * Number(pool.entryFeeNear || 0) * 0.95)} tNEAR</b> (${n} paid − 5% fee)\n🥇 50% · 🥈 30% · 🥉 20% — paid by the contract`;
+  }
+  return "";
+}
+function tgButtons(state, room) {
+  const rows = [];
+  if (state === "open") rows.push([{ text: getRoomGameMode(room) === "free" ? "▶️ Join room" : "▶️ Join game", url: telegramRoomJoinUrl(room.code) }]);
+  if ((state === "open" || state === "live") && typeof watchLiveAllowed === "function" && watchLiveAllowed(room)) rows.push([{ text: "👀 Watch live", url: `${TG_SITE}/?watch=${encodeURIComponent(room.code)}` }]);
+  if (state === "over" || state === "closed") rows.push([{ text: "🎮 Play now", url: `https://t.me/${TELEGRAM_BOT_USERNAME}?startapp=play` }]);
+  rows.push([{ text: "📖 How to play", url: `${TG_SITE}/how-to-play/` }, { text: "🏆 Ranks", url: TG_SITE }]);
+  return { inline_keyboard: rows };
+}
+// Single source of truth for what a room's post looks like right now.
+function telegramRoomStatusMessage(room, closing = false) {
+  const { players, humans, bots, host } = tgRoomPeople(room);
+  const mode = getRoomGameMode(room);
+  const matches = (room.pool && room.pool.maxMatches) || room.matchLimit || null;
+  const played = (room.pool && room.pool.matchesPlayed) || room.matchesPlayed || 0;
+  const top = tgTop3(room);
+  if (closing) {
+    if (top) return { kind: "over", state: "over", text: `🏁 <b>FINISHED</b> · ${tgHeader(room).replace(/\n/g, " · ")}\n<blockquote>${top}</blockquote>${played ? `🎮 ${played} match${played === 1 ? "" : "es"} played` : ""}`, keyboard: tgButtons("over", room) };
+    return { kind: null, state: "closed", text: `⚫ Room <code>${escapeTelegramHtml(room.code)}</code> — closed.`, keyboard: tgButtons("closed", room) };
+  }
+  if (!room.isPublic) return { kind: null, state: "private", text: `🔒 Room <code>${escapeTelegramHtml(room.code)}</code> — made private by the host. Not joinable from here.`, keyboard: tgButtons("closed", room) };
+  if (room.gameStarted) {
+    const alive = players.filter((p) => p.alive !== false).length;
+    const lead = top ? `\n<blockquote>Leading so far:\n${top}</blockquote>` : "\n";
+    return { kind: "live", state: "live", text: `${tgHeader(room)}\n🔴 <b>Match ${played + 1}${matches ? ` / ${matches}` : ""} in progress</b>\n👥 ${players.length} players · ${alive} alive${lead}Can't join now${watchLiveAllowedSafe(room) ? " — watch instead 👇" : "."}`, keyboard: tgButtons("live", room) };
+  }
+  const hostLine = host ? `👤 Host: <b>${escapeTelegramHtml(host.name || "Host")}</b>${host.spectator ? " (watching)" : ""}` : "";
+  const prize = tgPrizeLines(room);
+  const total = players.length;
+  const lines = [
+    tgHeader(room), hostLine,
+    prize ? `<blockquote>${prize}</blockquote>` : null,
+    `👥 ${tgSeatBar(total)}  <b>${total}/10</b>${bots ? `  (${bots} 🤖 bot${bots === 1 ? "" : "s"})` : ""}`,
+    `🎮 ${matches ? `${matches} match${matches === 1 ? "" : "es"}` : "No match limit"}${played ? ` · ${played} played` : ""} · 🌐 Public`,
+    total >= 4 ? "⚡ <b>Starting soon</b> — jump in!" : `Needs ${4 - total} more to start`,
+  ].filter(Boolean);
+  return { kind: mode, state: "open", text: lines.join("\n"), keyboard: tgButtons("open", room) };
+}
+function watchLiveAllowedSafe(room) { try { return typeof watchLiveAllowed === "function" && watchLiveAllowed(room); } catch { return false; } }
 
-// Called whenever a room's state changes in a way that should be
-// reflected in the group (created public, made public/private by the
-// host, game started, back to Lobby). Reuses the SAME Telegram message
-// via editMessageText for the room's entire lifetime instead of
-// posting a new one each time - this is what prevents the group from
-// being spammed with duplicate messages every time a room toggles
-// visibility or cycles through games.
-//
-// [BUG FIX] Previously this bailed out entirely whenever
-// room.isPublic was false, which meant toggling a room from public
-// back to private never touched its existing Telegram message at all
-// - it just sat there forever still showing "open" and a working Join
-// button. Now: if the room was NEVER public (no telegramMessageId
-// yet), it correctly stays silent; but if it WAS public before (a
-// message already exists), turning it private now properly edits that
-// same message to show the private/closed state.
-async function postOrUpdateRoomMessage(room) {
-  if (!room) return;
-  if (!room.isPublic && !room.telegramMessageId) return; // never posted, nothing to do
-
-  const { text, keyboard } = telegramRoomStatusMessage(room);
-
-  if (room.telegramMessageId) {
-    await tgCall("editMessageText", {
-      chat_id: TELEGRAM_CHAT_ID,
-      message_id: room.telegramMessageId,
-      text,
-      parse_mode: "HTML",
-      reply_markup: keyboard,
-    });
+// Sends or edits the room's post in the official group and in every group
+// whose admin typed /subscribe. Updates are coalesced (max one edit per
+// room every ~3 s) and a brand-new room waits 20 s before its first post,
+// so rooms that open and close right away never spam.
+const TG_FIRST_POST_DELAY_MS = 20 * 1000;
+const TG_EDIT_GAP_MS = 3000;
+const tgHasPost = (room) => !!(room.tgPosts && Object.keys(room.tgPosts).length);
+function tgTargets() {
+  const list = [{ chatId: String(TELEGRAM_CHAT_ID), thread: TELEGRAM_TOPIC_ID }];
+  for (const id of tgSubscribedChats) if (id !== String(TELEGRAM_CHAT_ID)) list.push({ chatId: id, thread: null });
+  return list.slice(0, 60);
+}
+function postOrUpdateRoomMessage(room) {
+  if (!room || !TELEGRAM_API) return;
+  if (!room.isPublic && !tgHasPost(room)) return;
+  if (!room._tgSince) room._tgSince = Date.now();
+  if (room._tgTimer) return;
+  const wait = tgHasPost(room) ? TG_EDIT_GAP_MS : Math.max(0, room._tgSince + TG_FIRST_POST_DELAY_MS - Date.now());
+  room._tgTimer = setTimeout(() => { room._tgTimer = null; tgFlushRoom(room).catch(() => {}); }, wait);
+  if (room._tgTimer.unref) room._tgTimer.unref();
+}
+async function tgFlushOne(room, t, msg) {
+  const { kind, state, text, keyboard } = msg;
+  room.tgPosts = room.tgPosts || {};
+  const post = room.tgPosts[t.chatId];
+  if (!post) {
+    if (state !== "open") return; // only open public rooms get a new post
+    const photo = tgBannerUrl(kind);
+    const payload = { chat_id: t.chatId, parse_mode: "HTML", reply_markup: keyboard };
+    if (t.thread) payload.message_thread_id = t.thread;
+    const result = photo ? await tgCall("sendPhoto", { ...payload, photo, caption: text }) : await tgCall("sendMessage", { ...payload, text });
+    if (result && result.message_id) room.tgPosts[t.chatId] = { id: result.message_id, photo: !!photo, kind };
     return;
   }
-
-  const result = await tgCall("sendMessage", {
-    chat_id: TELEGRAM_CHAT_ID,
-    message_thread_id: TELEGRAM_TOPIC_ID,
-    text,
-    parse_mode: "HTML",
-    reply_markup: keyboard,
-  });
-  if (result && result.message_id) {
-    room.telegramMessageId = result.message_id;
-  }
-}
-
-// Called right before a room is permanently deleted (everyone left /
-// grace period expired) - edits the message one last time (only if it
-// was ever actually posted) so it doesn't sit there forever looking
-// joinable, then the room object itself is discarded by the caller.
-async function markRoomMessageClosedForever(room) {
-  if (!room || !room.telegramMessageId) return;
-  await tgCall("editMessageText", {
-    chat_id: TELEGRAM_CHAT_ID,
-    message_id: room.telegramMessageId,
-    text: `⚫ Room <code>${escapeTelegramHtml(room.code)}</code> — closed (everyone left).`,
-    parse_mode: "HTML",
-    reply_markup: { inline_keyboard: [] },
-  });
-}
-
-async function handleRoomCommand(chatId, threadId) {
-  const openRooms = Object.values(rooms).filter((r) => r.isPublic && !r.gameStarted);
-  let text;
-  if (openRooms.length === 0) {
-    text = "😴 No public rooms open right now.\n\nSend /play to start a new game!";
-  } else {
-    text =
-      "🎮 <b>Open Rooms:</b>\n\n" +
-      openRooms
-        .map((r) => `🟢 <code>${escapeTelegramHtml(r.code)}</code> — ${Object.keys(r.players).length} player(s) waiting`)
-        .join("\n");
-  }
-  const payload = { chat_id: chatId, text, parse_mode: "HTML" };
-  if (threadId) payload.message_thread_id = threadId;
-  await tgCall("sendMessage", payload);
-}
-
-async function handlePlayCommand(chatId, threadId) {
-  const payload = {
-    chat_id: chatId,
-    text: "🚀 Ready to play NEAR Saboteur?",
-    reply_markup: {
-      // [BUG FIX] Was a plain https://t.me/<bot> link with no
-      // startapp param, which opened the BOT'S CHAT (with its own
-      // Play button inside) instead of the Mini App directly. Now
-      // uses the same startapp deep-link format as the room Join
-      // button, which opens the Mini App itself in one tap - this
-      // only works correctly once "Configure Mini App" / Direct Link
-      // is enabled for the bot in BotFather.
-      inline_keyboard: [[{ text: "▶️ Play Now", url: `https://t.me/${TELEGRAM_BOT_USERNAME}?startapp=play` }]],
-    },
-  };
-  if (threadId) payload.message_thread_id = threadId;
-  await tgCall("sendMessage", payload);
-}
-
-
-// Telegram delivers /room and /play commands here via webhook (set up
-// automatically on server startup - see registerTelegramWebhook below).
-// This is a completely separate Express route from Socket.io - it runs
-// on its own request/response cycle and can never block, delay, or
-// interfere with any game socket event.
-app.post("/telegram-webhook", (req, res) => {
-  // Acknowledge Telegram immediately - do this BEFORE any async work so
-  // Telegram never sees a timeout/retry regardless of how long our own
-  // processing or the outgoing sendMessage call takes.
-  res.sendStatus(200);
-  try {
-    const update = req.body || {};
-    const msg = update.message;
-    if (!msg || typeof msg.text !== "string") return;
-    const text = msg.text.trim().split("@")[0]; // strip "@BotName" suffix if present
-    const chatId = msg.chat && msg.chat.id;
-    const threadId = msg.message_thread_id;
-    if (!chatId) return;
-
-    if (text === "/room") {
-      handleRoomCommand(chatId, threadId);
-    } else if (text === "/play") {
-      handlePlayCommand(chatId, threadId);
+  if (post.photo) {
+    if (kind && kind !== post.kind) {
+      const photo = tgBannerUrl(kind);
+      if (photo) {
+        const r = await tgCall("editMessageMedia", { chat_id: t.chatId, message_id: post.id, media: { type: "photo", media: photo, caption: text, parse_mode: "HTML" }, reply_markup: keyboard });
+        if (r) { post.kind = kind; return; }
+      }
     }
+    await tgCall("editMessageCaption", { chat_id: t.chatId, message_id: post.id, caption: text, parse_mode: "HTML", reply_markup: keyboard });
+    return;
+  }
+  await tgCall("editMessageText", { chat_id: t.chatId, message_id: post.id, text, parse_mode: "HTML", reply_markup: keyboard });
+}
+async function tgFlushRoom(room, closing = false) {
+  if (!room || !TELEGRAM_API) return;
+  if (!closing && rooms[room.code] !== room) return; // room already gone
+  if (!room.isPublic && !tgHasPost(room)) return;
+  const msg = telegramRoomStatusMessage(room, closing);
+  const targets = msg.state === "open" ? tgTargets() : tgTargets().filter((t) => room.tgPosts && room.tgPosts[t.chatId]);
+  for (const t of targets) { try { await tgFlushOne(room, t, msg); } catch (e) { /* one chat failing never blocks the rest */ } }
+}
+
+// Called right before a room is deleted: one last edit to the final
+// result (top 3 if any match was played) so it never looks joinable.
+async function markRoomMessageClosedForever(room) {
+  if (!room) return;
+  evictWatchers(room, "The room closed."); // [WATCH LIVE]
+  if (room._tgTimer) { clearTimeout(room._tgTimer); room._tgTimer = null; }
+  if (!tgHasPost(room)) return;
+  await tgFlushRoom(room, true);
+}
+
+// ---------------- [TELEGRAM v2] Weekly-prize announcements ----------------
+// Posted in the official group's Announcements topic (TELEGRAM_ANNOUNCE_TOPIC_ID,
+// default 4) only when the weekly prizes are switched ON, switched OFF, or
+// paid. When prizes are off, nothing is posted on the weekend.
+const TELEGRAM_ANNOUNCE_TOPIC_ID = process.env.TELEGRAM_ANNOUNCE_TOPIC_ID ? Number(process.env.TELEGRAM_ANNOUNCE_TOPIC_ID) : 4;
+async function tgAnnounce(ev) {
+  if (!TELEGRAM_API || !ev) return;
+  const usd = (n) => `$${Math.round(Number(n || 0) * 100) / 100}`;
+  const medal = ["🥇", "🥈", "🥉"];
+  let text = "";
+  if (ev.kind === "on") {
+    const near = (u) => (ev.price ? ` (≈ ${(u / ev.price).toFixed(2)} NEAR)` : "");
+    text = `🏆 <b>Weekly NEAR prizes are ON</b> · ${usd(ev.prizeUsd)} every week\n<blockquote>${(ev.usd || []).slice(0, 3).map((u, i) => `${medal[i]} #${i + 1} — ${usd(u)}${near(u)}`).join("\n")}</blockquote>The top 3 on the weekly Ranks win real NEAR, paid automatically by the Saboteur Agent on NEAR Intents after the reset (${escapeTelegramHtml(ev.when || "Saturday 00:00")} IST).\nAdd your mainnet wallet on the Ranks page so your prize can reach you.\n<i>Optional and may change or stop at any time.</i>`;
+  } else if (ev.kind === "off") {
+    text = "⏸ <b>Weekly NEAR prizes are paused.</b>\nThis week's prize won't be paid. Ranks and points keep working as usual — we'll post here when prizes are back.";
+  } else if (ev.kind === "off_after_week") {
+    text = "⏳ <b>Weekly NEAR prizes: last week.</b>\nThis week's top 3 are still paid at the Saturday reset. After that, prizes pause until further notice.";
+  } else if (ev.kind === "paid") {
+    const lines = (ev.winners || []).map((w) => `${medal[w.rank - 1] || "#" + w.rank} <b>${escapeTelegramHtml(w.name || "Player")}</b> — ${w.amountNear} NEAR${w.status === "held" ? " (waiting for a wallet)" : ""}`).join("\n");
+    text = `🏆 <b>Weekly prizes paid</b>${ev.label ? ` · ${escapeTelegramHtml(ev.label)}` : ""}\n<blockquote>${lines}</blockquote>Paid automatically by the Saboteur Agent on NEAR Intents.${ev.txHash ? `\n🔗 <a href="https://nearblocks.io/txns/${encodeURIComponent(ev.txHash)}">Proof on NEAR</a>` : ""}\nA new week has started — climb the Ranks! 🚀`;
+  } else return;
+  const keyboard = { inline_keyboard: [[{ text: "🏆 Open the Ranks", url: TG_SITE }], [{ text: "🎮 Play now", url: `https://t.me/${TELEGRAM_BOT_USERNAME}?startapp=play` }]] };
+  const photo = ev.photo ? tgBannerUrl(ev.photo) : null;
+  const payload = { chat_id: TELEGRAM_CHAT_ID, message_thread_id: TELEGRAM_ANNOUNCE_TOPIC_ID, parse_mode: "HTML", reply_markup: keyboard };
+  if (photo) await tgCall("sendPhoto", { ...payload, photo, caption: text });
+  else await tgCall("sendMessage", { ...payload, text, link_preview_options: { is_disabled: true } });
+}
+
+// ---------------- [TELEGRAM v2] Bot commands ----------------
+// Work in ANY group the bot is in. The bot only answers commands (max one
+// answer per 10 s per group) and never posts there on its own - unless a
+// group admin types /subscribe. Every button is a URL button so it
+// survives forwarding.
+const TgSubscription = mongoose.models.TgSubscription || mongoose.model("TgSubscription", new mongoose.Schema({
+  chatId: { type: String, unique: true }, title: String, addedBy: String, at: { type: Date, default: Date.now },
+}));
+const tgSubscribedChats = new Set();
+async function loadTgSubscriptions() {
+  if (!MONGODB_URI || !TELEGRAM_API) return;
+  try { (await TgSubscription.find({}, "chatId").lean()).forEach((d) => tgSubscribedChats.add(String(d.chatId))); } catch (e) { console.warn("[Telegram] subscriptions load failed:", e.message); }
+}
+const tgLastAnswer = new Map();
+const tgPlayUrl = () => `https://t.me/${TELEGRAM_BOT_USERNAME}?startapp=play`;
+const tgPairs = (btns) => { const rows = []; for (let i = 0; i < btns.length; i += 2) rows.push(btns.slice(i, i + 2)); return rows; };
+async function tgReply(chatId, threadId, { text, photoKind, keyboard }) {
+  const payload = { chat_id: chatId, parse_mode: "HTML" };
+  if (threadId) payload.message_thread_id = threadId;
+  payload.reply_markup = keyboard || { inline_keyboard: [] };
+  const photo = photoKind ? tgBannerUrl(photoKind) : null;
+  if (photo) return tgCall("sendPhoto", { ...payload, photo, caption: text });
+  return tgCall("sendMessage", { ...payload, text, link_preview_options: { is_disabled: true } });
+}
+function tgRoomLine(r) {
+  const mode = getRoomGameMode(r); const { players } = tgRoomPeople(r);
+  const code = `<code>${escapeTelegramHtml(r.code)}</code>`;
+  const host = (tgRoomPeople(r).host || {}).name;
+  if (mode === "pool") { const pr = r.pool.mode === "manual" ? `${tgNum(r.pool.prizeNear)} NEAR prize` : `${tgNum(r.pool.entryFeeNear)} tNEAR prize`; return `🏆 <b>POOL</b> · ${code} · ${pr} · ${players.length}/10`; }
+  if (mode === "paid") return `💸 <b>PAID</b> · ${code} · ${tgNum(r.pool.entryFeeNear)} tNEAR entry · ${players.length}/10`;
+  return `🟢 <b>FREE</b> · ${code}${host ? ` · ${escapeTelegramHtml(host)}` : ""} · ${players.length}/10${players.length >= 4 ? " · ⚡ starting soon" : ""}`;
+}
+const TG_HELP = `🤖 <b>NEAR Saboteur bot</b>
+/play — open the game
+/rooms — rooms you can join now
+/live — matches being played
+/ranks — this week's top players and prize
+/help — this list
+<i>Group admins:</i> /subscribe — get new-room cards here · /unsubscribe — stop them`;
+async function tgCommand(cmd, msg) {
+  const chatId = msg.chat.id; const threadId = msg.message_thread_id; const isGroup = msg.chat.type === "group" || msg.chat.type === "supergroup";
+  const how = { text: "📖 How to play", url: `${TG_SITE}/how-to-play/` };
+  if (cmd === "/play" || cmd === "/start") {
+    return tgReply(chatId, threadId, { photoKind: "free", text: `🕵️ <b>NEAR Saboteur</b> — find the Saboteur before it's too late.\nA social deduction game on NEAR: 4–10 players, AI bots fill empty seats.\n<blockquote>🆓 Free to play · 🏆 weekly NEAR prizes for the top 3\n💰 Pool games with real NEAR prizes</blockquote>`, keyboard: { inline_keyboard: [[{ text: "▶️ Play now", url: tgPlayUrl() }], [how, { text: "🏆 Ranks", url: TG_SITE }]] } });
+  }
+  if (cmd === "/rooms" || cmd === "/room") {
+    const open = Object.values(rooms).filter((r) => r.isPublic && !r.gameStarted && !r.devMode).slice(0, 5);
+    if (!open.length) return tgReply(chatId, threadId, { text: "😴 <b>No rooms open right now.</b>\nStart one — your friends (or AI bots) can join in seconds.", keyboard: { inline_keyboard: [[{ text: "▶️ Start a room", url: tgPlayUrl() }], [how]] } });
+    const btns = open.map((r) => ({ text: `▶️ Join ${r.code}`, url: telegramRoomJoinUrl(r.code) }));
+    return tgReply(chatId, threadId, { text: `🎮 <b>Open rooms right now</b>\n<blockquote>${open.map(tgRoomLine).join("\n")}</blockquote>Tap a room to join 👇`, keyboard: { inline_keyboard: [...tgPairs(btns), [{ text: "🎮 Start your own room", url: tgPlayUrl() }]] } });
+  }
+  if (cmd === "/live") {
+    const live = Object.values(rooms).filter((r) => r.isPublic && r.gameStarted && !r.devMode).slice(0, 5);
+    if (!live.length) return tgReply(chatId, threadId, { text: "😴 <b>No public matches being played right now.</b>\nStart one and get your group in!", keyboard: { inline_keyboard: [[{ text: "▶️ Play now", url: tgPlayUrl() }]] } });
+    const lines = live.map((r) => { const { players } = tgRoomPeople(r); const played = (r.pool && r.pool.matchesPlayed) || r.matchesPlayed || 0; const max = (r.pool && r.pool.maxMatches) || r.matchLimit; return `${tgRoomLine(r).split(" · ")[0]} · <code>${escapeTelegramHtml(r.code)}</code> · Match ${played + 1}${max ? `/${max}` : ""} · ${players.filter((p) => p.alive !== false).length} alive`; });
+    const btns = live.filter((r) => watchLiveAllowedSafe(r)).map((r) => ({ text: `👀 Watch ${r.code}`, url: `${TG_SITE}/?watch=${encodeURIComponent(r.code)}` }));
+    return tgReply(chatId, threadId, { text: `🔴 <b>Live matches</b>\n<blockquote>${lines.join("\n")}</blockquote>`, keyboard: { inline_keyboard: [...tgPairs(btns), [{ text: "🎮 Play now", url: tgPlayUrl() }]] } });
+  }
+  if (cmd === "/ranks" || cmd === "/top") {
+    const weekStart = await getEffectiveLeaderboardStart("weekly", getCurrentWeekStartUTC());
+    const rows = await MatchRecord.aggregate([{ $match: { earnedAt: { $gte: weekStart } } }, { $group: { _id: "$playerId", points: { $sum: "$points" } } }, { $match: { points: { $gt: 0 } } }, { $sort: { points: -1 } }, { $limit: 10 }]);
+    const people = await Player.find({ _id: { $in: rows.map((r) => r._id) } }, "name username").lean();
+    const byId = new Map(people.map((p) => [String(p._id), p]));
+    const list = rows.map((r) => ({ name: (byId.get(String(r._id)) || {}).name || (byId.get(String(r._id)) || {}).username, points: r.points })).filter((x) => x.name);
+    let prize = null; try { prize = await weeklyAgent.publicView(null); } catch (e) { prize = null; }
+    const usd = prize && prize.active && Array.isArray(prize.prizesUsd) ? prize.prizesUsd : null;
+    const medal = ["🥇", "🥈", "🥉"];
+    const top3 = list.slice(0, 3).map((x, i) => `${medal[i]} <b>${escapeTelegramHtml(x.name)}</b> — ${x.points} pts${usd && usd[i] ? ` · wins $${usd[i]}` : ""}`).join("\n");
+    const rest = list.slice(3).map((x, i) => `${i + 4}. ${escapeTelegramHtml(x.name)} ${x.points}`).join(" · ");
+    const resetsIn = (() => { const ms = (prize && prize.resetAt ? new Date(prize.resetAt).getTime() : weekStart.getTime() + 7 * 864e5) - Date.now(); const d = Math.floor(ms / 864e5), h = Math.floor((ms % 864e5) / 36e5); return ms > 0 ? `resets in ${d}d ${h}h` : "resetting now"; })();
+    const prizeLine = prize && prize.active ? `💰 This week's prize: <b>$${prize.prizeUsd} in NEAR</b>, paid automatically after the Saturday reset.` : "";
+    return tgReply(chatId, threadId, { photoKind: "weekly", text: `🏆 <b>This week's top players</b> · ${resetsIn}\n${top3 ? `<blockquote>${top3}</blockquote>` : "No points yet this week — be the first!\n"}${rest ? `${rest}\n` : ""}${prizeLine}`, keyboard: { inline_keyboard: [[{ text: "🏆 Open the Ranks", url: TG_SITE }], [{ text: "🎮 Play now", url: tgPlayUrl() }]] } });
+  }
+  if (cmd === "/subscribe" || cmd === "/unsubscribe") {
+    if (!isGroup) return tgReply(chatId, threadId, { text: "This works in groups only: add the bot to your group, then a group admin types /subscribe." });
+    if (String(chatId) === String(TELEGRAM_CHAT_ID) || (msg.chat.username && `@${msg.chat.username}`.toLowerCase() === String(TELEGRAM_CHAT_ID).toLowerCase())) return tgReply(chatId, threadId, { text: "This is the official group — rooms are already posted here." });
+    const member = await tgCall("getChatMember", { chat_id: chatId, user_id: msg.from && msg.from.id });
+    if (!member || !["creator", "administrator"].includes(member.status)) return tgReply(chatId, threadId, { text: "Only group admins can do that." });
+    if (cmd === "/subscribe") {
+      await TgSubscription.updateOne({ chatId: String(chatId) }, { $set: { chatId: String(chatId), title: msg.chat.title || "", addedBy: String(msg.from.id), at: new Date() } }, { upsert: true });
+      tgSubscribedChats.add(String(chatId));
+      return tgReply(chatId, threadId, { text: "✅ <b>Subscribed.</b> New public rooms will be posted in this group (one card per room, updated live).\nUse /unsubscribe to stop." });
+    }
+    await TgSubscription.deleteOne({ chatId: String(chatId) });
+    tgSubscribedChats.delete(String(chatId));
+    return tgReply(chatId, threadId, { text: "🔕 <b>Unsubscribed.</b> No more room cards here. Commands still work." });
+  }
+  if (cmd === "/help") return tgReply(chatId, threadId, { text: TG_HELP, keyboard: { inline_keyboard: [[{ text: "▶️ Play now", url: tgPlayUrl() }], [how]] } });
+}
+
+// Telegram delivers commands here via webhook (registered on startup - see
+// registerTelegramWebhook). Separate from Socket.io, never blocks a game.
+const TG_COMMANDS = new Set(["/play", "/start", "/rooms", "/room", "/live", "/ranks", "/top", "/help", "/subscribe", "/unsubscribe"]);
+app.post("/telegram-webhook", (req, res) => {
+  res.sendStatus(200); // acknowledge first so Telegram never retries
+  try {
+    if (!TELEGRAM_API) return;
+    const secret = process.env.TELEGRAM_WEBHOOK_SECRET;
+    if (secret && req.get("X-Telegram-Bot-Api-Secret-Token") !== secret) return;
+    const msg = (req.body || {}).message;
+    if (!msg || typeof msg.text !== "string" || !msg.chat) return;
+    const [head] = msg.text.trim().split(/\s+/);
+    const [cmdRaw, mention] = head.split("@");
+    const cmd = cmdRaw.toLowerCase();
+    if (!TG_COMMANDS.has(cmd)) return;
+    if (mention && mention.toLowerCase() !== TELEGRAM_BOT_USERNAME.toLowerCase()) return; // meant for another bot
+    const key = String(msg.chat.id);
+    if (msg.chat.type !== "private" && Date.now() - (tgLastAnswer.get(key) || 0) < 10000) return; // max one answer per 10 s per group
+    tgLastAnswer.set(key, Date.now());
+    tgCommand(cmd, msg).catch((e) => console.warn("[Telegram] command failed:", e.message));
   } catch (err) {
     console.warn("[Telegram webhook] error:", err.message);
   }
 });
+
+// Sets the "/" command menu Telegram shows in every chat.
+async function registerTelegramCommands() {
+  await tgCall("setMyCommands", { commands: [
+    { command: "play", description: "Open NEAR Saboteur" },
+    { command: "rooms", description: "Rooms you can join now" },
+    { command: "live", description: "Matches being played" },
+    { command: "ranks", description: "This week's top players and prize" },
+    { command: "help", description: "All commands" },
+  ] });
+  await tgCall("setMyCommands", { scope: { type: "all_chat_administrators" }, commands: [
+    { command: "play", description: "Open NEAR Saboteur" },
+    { command: "rooms", description: "Rooms you can join now" },
+    { command: "live", description: "Matches being played" },
+    { command: "ranks", description: "This week's top players and prize" },
+    { command: "subscribe", description: "Post new rooms in this group" },
+    { command: "unsubscribe", description: "Stop room posts here" },
+    { command: "help", description: "All commands" },
+  ] });
+}
 
 // Registers our webhook URL with Telegram on startup, so /room and
 // /play commands actually reach the server. Uses Render's own
@@ -7543,7 +7866,9 @@ async function registerTelegramWebhook() {
     return;
   }
   const webhookUrl = `${publicUrl.replace(/\/$/, "")}/telegram-webhook`;
-  const result = await tgCall("setWebhook", { url: webhookUrl });
+  const result = await tgCall("setWebhook", { url: webhookUrl, allowed_updates: ["message"], ...(process.env.TELEGRAM_WEBHOOK_SECRET ? { secret_token: process.env.TELEGRAM_WEBHOOK_SECRET } : {}) });
+  registerTelegramCommands().catch(() => {});
+  loadTgSubscriptions().catch(() => {});
   if (result !== null) {
     console.log(`[Telegram] Webhook registered at ${webhookUrl}`);
   }
@@ -7906,6 +8231,7 @@ function stagePendingPointsForRoom(room) {
     // back in the Lobby wipes role/alive/missions for the whole room, so
     // everyone committing after them used to save an empty role, "out" and 0 missions.
     p.pendingMeta = {
+      humans: Object.values(room.players).filter((x) => !x.isBot && !x.spectator).length, // [REFERRALS]
       role: p.role || "", survived: !!p.alive, matchId: room.currentMatchId || "",
       missionsDone: Math.max(p.missionsDone || 0, p.pendingMissionsDone || 0),
       killsCount: p.killsCount || 0, meetingsSurvivedCount: p.meetingsSurvivedCount || 0,
@@ -8172,6 +8498,7 @@ async function commitPendingPoints(meta) {
       if (won) player.gamesWon += 1;
       player.pointsMatchesToday += 1;
       await player.save();
+      if (player.referredBy && !player.referralRewardedAt) referralMatchDone(player, meta).catch(() => {}); // [REFERRALS]
     }
 
     // [POINTS SYSTEM STEP 2] Per-match history row - deliberately a
@@ -8259,6 +8586,7 @@ async function commitPendingPointsForPlayer(room, socketId, extraFields = {}) {
     matchPoints: awardPoints,
     won: awardWon,
     spectator: !!(pm && pm.spectator),
+    humans: pm ? (pm.humans || 0) : 0, // [REFERRALS]
     matchId: (pm && pm.matchId) || room.currentMatchId || "",
     roomCode: room.code || "",
     playerName: me.name || "",
@@ -8296,6 +8624,7 @@ function getPlayerList(roomCode) {
   if (!room) return [];
   return Object.entries(room.players).map(([id, p]) => ({
     id,
+    watcher: !!p.watcher, // [WATCH LIVE] public watcher - not a player, not shown in the room
     name: p.name,
     avatarId: p.avatarId,
     // [NEW FEATURE - PLAY PASS] The active premium skin id (e.g.
@@ -8436,6 +8765,7 @@ function leaveCurrentRoomIfAny(io, socket) {
   if (!oldRoomCode || !rooms[oldRoomCode]) return;
   const oldRoom = rooms[oldRoomCode];
   if (!oldRoom.players[socket.id]) return;
+  if (oldRoom.players[socket.id].watcher) { dropWatcherIfAny(socket); return; } // [WATCH LIVE]
 
   const wasHost = oldRoom.players[socket.id].isHost;
   const wasGameStarted = oldRoom.gameStarted;
@@ -10435,6 +10765,7 @@ io.on("connection", (socket) => {
 
     // Updated player-list to everyone in the room (new player shows up for everyone)
     io.to(roomCode).emit("playerListUpdated", { players: playerList });
+    postOrUpdateRoomMessage(room); // [TELEGRAM v2] seat count (coalesced)
     // [LOBBY LEADERBOARD] Let everyone else's already-open leaderboard
     // view pick up the new player immediately too.
     broadcastRoomLeaderboard(room);
@@ -10642,6 +10973,27 @@ io.on("connection", (socket) => {
   // enterPool below), so a returning pool player can only ever look
   // their room back up by the pool's own id, which they do already
   // know (it's public information, shown on every pool's own card).
+  // [WATCH LIVE] Join a public FREE/POOL room as a silent watcher.
+  socket.on("watchRoom", ({ code, name } = {}, callback) => {
+    const ack = typeof callback === "function" ? callback : () => {};
+    const roomCode = String(code || "").toUpperCase().trim();
+    const room = rooms[roomCode];
+    if (!watchLiveEnabled) return ack({ ok: false, message: "Watching is switched off right now." });
+    if (!room) return ack({ ok: false, message: "That room doesn't exist anymore." });
+    if (!watchLiveAllowed(room)) return ack({ ok: false, message: getRoomGameMode(room) === "paid" ? "Paid games can't be watched." : "This room can't be watched." });
+    if (Object.values(room.players).filter((p) => p.watcher).length >= MAX_WATCHERS_PER_ROOM) return ack({ ok: false, message: "Too many people are watching this match - try another one." });
+    leaveCurrentRoomIfAny(io, socket);
+    const playerToken = generatePlayerToken();
+    const shown = String(name || "").replace(/[<>]/g, "").trim().slice(0, 20) || "Watcher";
+    room.players[socket.id] = { name: `${shown} 👀`, avatarId: "black", isHost: false, playerToken, accountId: null, spectator: true, watcher: true, alive: false, role: room.gameStarted ? "spectator" : undefined };
+    socket.join(room.code);
+    socket.data.roomCode = room.code;
+    socket.data.playerToken = playerToken;
+    socket.emit("reconnected", { code: room.code, watcher: true, ...buildFullRestorePayload(room, room.players[socket.id], socket.id) });
+    io.to(room.code).emit("playerListUpdated", { players: getPlayerList(room.code) });
+    ack({ ok: true, code: room.code, playerToken, live: !!room.gameStarted });
+  });
+
   socket.on("reconnectToRoom", ({ code, playerToken, onChainPoolId }) => {
     const roomCode = (code || "").toUpperCase().trim();
     const room = roomCode ? rooms[roomCode] : Object.values(rooms).find((r) => r.pool && r.pool.onChainPoolId === String(onChainPoolId));
@@ -10816,6 +11168,7 @@ io.on("connection", (socket) => {
   // completely: the client only proceeds once the server confirms this
   // player is genuinely, fully removed.
   socket.on("leaveRoom", async (callback) => {
+    if (dropWatcherIfAny(socket)) { if (typeof callback === "function") callback({ ok: true }); return; } // [WATCH LIVE]
     const ack = typeof callback === "function" ? callback : () => {};
     const roomCode = socket.data.roomCode;
     const room = rooms[roomCode];
@@ -12633,6 +12986,7 @@ io.on("connection", (socket) => {
   // [MULTIPLAYER: SHARED] - every player's chat history should show the
   // same messages, so the server is the single source of truth here.
   socket.on("sendChatMessage", ({ text, replyTo, gifUrl, sticker }) => {
+    if (isWatcherSocket(socket)) return; // [WATCH LIVE] watchers can only watch
     const res = postMeetingChat(socket.data.roomCode, socket.id, text, replyTo, gifUrl, sticker);
     if (res && !res.senderId && res.message === "You are a ghost and cannot send chat messages.") socket.emit("chatError", res);
   });
@@ -12645,6 +12999,7 @@ io.on("connection", (socket) => {
   // see a ghost chat message, regardless of any client-side bug, since
   // their socket is simply never one of the targets in the first place.
   socket.on("sendGhostChatMessage", ({ text, replyTo, gifUrl, sticker }) => {
+    if (isWatcherSocket(socket)) return; // [WATCH LIVE] watchers can only watch
     const roomCode = socket.data.roomCode;
     const room = rooms[roomCode];
     if (!room || !room.gameStarted) return;
@@ -12700,6 +13055,7 @@ io.on("connection", (socket) => {
   // ghosts-only - only usable while !room.gameStarted, and broadcasts to
   // every player currently in the room (not a filtered subset).
   socket.on("sendLobbyChatMessage", ({ text, replyTo, gifUrl, sticker }) => {
+    if (isWatcherSocket(socket)) return; // [WATCH LIVE] watchers can only watch
     const roomCode = socket.data.roomCode;
     const room = rooms[roomCode];
     if (!room) return;
@@ -12759,6 +13115,7 @@ io.on("connection", (socket) => {
   // [MULTIPLAYER: SHARED] - the server is what keeps the vote count and
   // decides the result, so no client can fake an outcome.
   socket.on("castVote", ({ targetId, back }) => {
+    if (isWatcherSocket(socket)) return; // [WATCH LIVE] watchers can only watch
     const err = castMeetingVote(socket.data.roomCode, socket.id, targetId, !!back);
     if (err) socket.emit("voteError", err);
   });
@@ -12817,6 +13174,7 @@ io.on("connection", (socket) => {
 
   socket.on("disconnect", () => {
     console.log("Player disconnected:", socket.id);
+    if (dropWatcherIfAny(socket)) return; // [WATCH LIVE] a watcher just leaves - no grace period, no host change
 
     // [NEW FEATURE - PRIVATE ROOM JOIN REQUESTS] A requester isn't
     // actually "in" any room yet (no socket.data.roomCode set) while
@@ -13322,7 +13680,7 @@ const RECONCILE_INTERVAL_MS = 3 * 60 * 1000;
 setInterval(() => { reconcileOrphanedPools(); reconcileManualPools(); }, RECONCILE_INTERVAL_MS);
 
 weeklyAgent.init({
-  Player, MatchRecord, Announcement, sendInboxMessage, cleanPayoutWallet, getCurrentWeekStartUTC, logAdminAction,
+  Player, MatchRecord, Announcement, sendInboxMessage, cleanPayoutWallet, getCurrentWeekStartUTC, logAdminAction, tgAnnounce,
   leaderboardResetAt: async () => { const d = await LeaderboardReset.findOne({ type: "weekly" }).lean(); return d ? d.resetAt : null; },
 });
 
@@ -13336,4 +13694,5 @@ server.listen(PORT, () => {
   // delay the server from starting up and accepting game connections
   // even if it fails or Telegram is unreachable.
   registerTelegramWebhook();
+  loadWatchLiveSetting(); // [WATCH LIVE]
 });
