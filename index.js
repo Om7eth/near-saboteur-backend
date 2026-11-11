@@ -7496,9 +7496,20 @@ function withJoinButton(payload) {
   if (kb.some((row) => row.some((b) => b && b.url === TELEGRAM_GROUP_URL))) return payload;
   return { ...payload, reply_markup: { ...payload.reply_markup, inline_keyboard: [...kb, [{ text: "💬 Join the NEAR Saboteur group", url: TELEGRAM_GROUP_URL }]] } };
 }
+// Every bot message also ends with the website and the X account (plain
+// text links, no extra buttons).
+const TG_FOOTER = `\n\n🌐 <a href="https://nearsaboteur.com">nearsaboteur.com</a> · 𝕏 <a href="https://x.com/NearSaboteur">@NearSaboteur</a>`;
+function withFooter(method, payload) {
+  const add = (t) => (typeof t === "string" && !t.includes("x.com/NearSaboteur") ? t + TG_FOOTER : t);
+  if (method === "sendMessage" || method === "editMessageText") return { link_preview_options: { is_disabled: true }, ...payload, text: add(payload.text) };
+  if (method === "sendPhoto" || method === "editMessageCaption") return { ...payload, caption: add(payload.caption) };
+  if (method === "editMessageMedia" && payload.media) return { ...payload, media: { ...payload.media, caption: add(payload.media.caption) } };
+  return payload;
+}
 async function tgCall(method, payload) {
   if (!TELEGRAM_API) return null;
   if (/^(sendMessage|sendPhoto|editMessageText|editMessageCaption|editMessageMedia|editMessageReplyMarkup)$/.test(method)) payload = withJoinButton(payload);
+  payload = withFooter(method, payload);
   try {
     const res = await fetch(`${TELEGRAM_API}/${method}`, {
       method: "POST",
