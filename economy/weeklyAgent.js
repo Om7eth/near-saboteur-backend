@@ -704,6 +704,7 @@ async function publicView(me) {
     lastWeek: recent[0] ? batchView(recent[0], false) : null,
     weekBefore: recent[1] ? batchView(recent[1], false) : null,
     agentAccount: s.walletNearId || null,
+    staff: [...EXCLUDED], // shown with a DEV tag on Ranks; never win the prize
   };
 }
 
