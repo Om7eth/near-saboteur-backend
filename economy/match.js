@@ -293,7 +293,7 @@ async function payReferral({ referrerId, name, friendId, amount }) {
 // ---- [$SABOTEUR v2] "Catch = burn" + the public event feed ----
 const eventSchema = new mongoose.Schema({
   kind: { type: String, index: true }, // "catch" | "pass"
-  matchId: String, roomCode: String, name: String, amount: Number, txHash: String,
+  matchId: String, roomCode: String, name: String, bot: Boolean, amount: Number, txHash: String,
   createdAt: { type: Date, default: Date.now, index: true },
 });
 const SaboEvent = mongoose.models.SaboEvent || mongoose.model("SaboEvent", eventSchema);
@@ -309,13 +309,23 @@ function catchBurn({ io, roomCode, room, ejectedId, hasDb }) {
   T.catchRitual(matchId, humans).then(async (res) => {
     if (!res.ok || res.already) { if (!res.ok) console.warn("[SABOTEUR v2] catch burn failed:", res.error); return; }
     const amount = res.burned || 0;
-    if (hasDb) await SaboEvent.create({ kind: "catch", matchId, roomCode, name: p.name, amount, txHash: res.txHash }).catch(() => {});
+    if (hasDb) await SaboEvent.create({ kind: "catch", matchId, roomCode, name: p.name, bot: !!p.isBot, amount, txHash: res.txHash }).catch(() => {});
     io.to(roomCode).emit("saboteurBurn", { name: p.name, amount, txUrl: res.txHash ? T.explorerTx(res.txHash) : null });
   }).catch(() => {});
+}
+// Wall of Shame: the most-caught saboteurs (public token page).
+async function wallOfShame(limit = 10) {
+  const rows = await SaboEvent.aggregate([
+    { $match: { kind: "catch" } },
+    { $group: { _id: "$name", caught: { $sum: 1 }, burned: { $sum: "$amount" }, bot: { $max: "$bot" }, last: { $max: "$createdAt" } } },
+    { $sort: { caught: -1, burned: -1, last: -1 } },
+    { $limit: limit },
+  ]).catch(() => []);
+  return rows.map((r) => ({ name: r._id || "Saboteur", caught: r.caught, burned: r.burned, bot: !!r.bot }));
 }
 async function recentEvents(limit = 8) {
   const rows = await SaboEvent.find().sort({ createdAt: -1 }).limit(limit).lean().catch(() => []);
   return rows.map((r) => ({ kind: r.kind, name: r.name, roomCode: r.roomCode, amount: r.amount, txUrl: r.txHash ? T.explorerTx(r.txHash) : null, at: r.createdAt }));
 }
 
-module.exports = { catchBurn, recentEvents, SaboEvent, payReferral, recordBack, backVoteAllowed, backDelta, backsFor, settleMatch, startRetryLoop, playerSummary, botsSummary, adminSummary, TokenLedger };
+module.exports = { catchBurn, recentEvents, wallOfShame, SaboEvent, payReferral, recordBack, backVoteAllowed, backDelta, backsFor, settleMatch, startRetryLoop, playerSummary, botsSummary, adminSummary, TokenLedger };

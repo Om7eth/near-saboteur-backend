@@ -5376,6 +5376,10 @@ app.get("/saboteur/live", async (req, res) => {
     res.json({ active: true, ...stats, events: await economy.recentEvents(8) });
   } catch (e) { res.status(500).json({ message: "Couldn't read the token contract right now." }); }
 });
+app.get("/saboteur/wall", async (req, res) => {
+  try { res.json({ wall: await economy.wallOfShame(10) }); }
+  catch (e) { res.status(500).json({ message: "Couldn't load the Wall of Shame." }); }
+});
 // [$SABOTEUR v2] Play Pass by burning $SABOTEUR from the player's game wallet.
 const sabPassBusy = new Set();
 app.post("/play-pass/burn-saboteur", async (req, res) => {
