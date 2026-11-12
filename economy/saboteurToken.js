@@ -235,9 +235,17 @@ function rewardReferral(referralId, wallet) {
 function buyPlayPass(wallet) {
   if (!configured() || !V2) return Promise.resolve({ ok: false, error: "v2 not configured" });
   return enqueue(async () => {
-    const { near, provider } = await chain();
+    const { near, provider, parent } = await chain();
+    // Game wallets are created with only 0.01 NEAR - not enough to attach gas.
+    // Top it up from the parent first (testnet NEAR), then burn with a small gas limit.
+    try {
+      const st = await provider.viewAccount({ accountId: wallet });
+      if (BigInt(st.amount) < BigInt(near.nearToYocto("0.03"))) {
+        await parent.transfer({ receiverId: wallet, amount: BigInt(near.nearToYocto("0.05")) });
+      }
+    } catch (e) { console.warn("[SABOTEUR] gas top-up failed:", e.message); }
     const acct = new near.Account(wallet, provider, KEY);
-    return callV2(acct, "buy_play_pass", {}, { gas: "30", deposit: 1n });
+    return callV2(acct, "buy_play_pass", {}, { gas: "15", deposit: 1n });
   });
 }
 let statsCache = { at: 0, data: null };
