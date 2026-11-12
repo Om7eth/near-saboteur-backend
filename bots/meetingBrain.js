@@ -265,6 +265,9 @@ function evidenceLines(room, botId, memory, now) {
     const from = lastAlive ? lastAlive.t : latest.foundAt - 90000;
     const inWindow = memory.filter((m) => m.kind === "saw" && m.t >= from && m.t <= latest.foundAt);
     for (const m of inWindow) if (latest.where && m.where === latest.where && m.name !== latest.victim) add(m.name, 2, `you saw them in the body's room (${latest.where})`);
+    // [BOT VOTES] seen right where the body was, just before it was found = strong evidence
+    const close = new Set(inWindow.filter((m) => latest.where && m.where === latest.where && m.name !== latest.victim && latest.foundAt - m.t <= 20000).map((m) => m.name));
+    for (const n of close) add(n, 1.5, `you saw them in ${latest.where} only seconds before the body was found`);
     // claims about the latest death
     const ejectRole = {}; for (const e of room.ejections || []) ejectRole[e.name] = e.role;
     for (const e of meeting.messages || []) {
@@ -293,7 +296,8 @@ function evidenceLines(room, botId, memory, now) {
   if (top && top[1] >= 3) out.push(`YOUR READ: ${top[0]} is very likely a saboteur (${why[top[0]].join("; ")}). Say why and vote ${top[0]}.`);
   else if (top && top[1] > 0) out.push(`YOUR READ: leaning ${top[0]} (${why[top[0]].join("; ")}) but not enough yet - ask ${top[0]} or the accuser ONE specific question; vote skip unless more comes out.`);
   else out.push("YOUR READ: nothing points to anyone yet - ask a specific question or share what you saw; vote skip.");
-  evidenceLines.last = { voteFor: top && top[1] >= 3 ? top[0] : null, liars: liars.length ? Object.keys(score).filter((n) => score[n] >= 2 && why[n].some((r) => r.includes("contradicts"))) : [] };
+  evidenceLines.last = { ranked: ranked.filter(([, v]) => v > 0).map(([n]) => n), voteFor: top && top[1] >= 3 ? top[0] : null, liars: liars.length ? Object.keys(score).filter((n) => score[n] >= 2 && why[n].some((r) => r.includes("contradicts"))) : [] };
+  if (bodies.length && skipLoses(room)) out.push("ENDGAME: so few players are left that if nobody is voted out, the saboteur wins with the next kill. Do NOT vote skip: vote your best suspect and say why.");
   return out.slice(-10);
 }
 
@@ -512,7 +516,30 @@ async function think(room, roomCode, botId, memory, bs, now, st, purpose) {
     }
   }
   if (ctx.noDeaths) vote = "skip"; // nobody died: nothing to vote anyone out for
+  // [BOT VOTES - ENDGAME] If skipping now means the saboteurs win after the next
+  // kill, a crew bot never skips: it votes its best suspect (or the most accused).
+  if (!ctx.isSab && !ctx.noDeaths && vote === "skip" && skipLoses(room)) {
+    const alive = Object.entries(room.players).filter(([id, p]) => p.alive !== false && id !== botId && !p.spectator);
+    const byName = (n) => (alive.find(([, p]) => p.name === n) || [])[0];
+    let pickId = ((ctx.read && ctx.read.ranked) || []).map(byName).find(Boolean);
+    if (!pickId) {
+      const cnt = {};
+      for (const m of (room.meeting && room.meeting.messages) || []) {
+        if (m.senderId === botId || !m.text) continue;
+        for (const [id, p] of alive) if (nameRx(p.name).test(m.text)) cnt[id] = (cnt[id] || 0) + 1;
+      }
+      pickId = Object.entries(cnt).sort((a, b) => b[1] - a[1]).map(([id]) => id)[0];
+    }
+    if (!pickId && alive.length) pickId = alive[Math.floor(Math.random() * alive.length)][0];
+    if (pickId) vote = pickId;
+  }
   return { say, vote, source };
+}
+// Public info only: saboteurs at the start minus the ones already ejected (roles are revealed on ejection).
+function skipLoses(room) {
+  const sabsLeft = Math.max(1, (room.saboteurCountStart || 1) - (room.ejections || []).filter((e) => e.role === "saboteur").length);
+  const alive = Object.values(room.players).filter((p) => p.alive !== false && !p.spectator && p.role).length;
+  return alive <= sabsLeft + 2; // one more kill would leave fewer than 2 crew
 }
 const ASK_WHY_RX = /(\bwhy\b|\bkyu|\bkyun|क्यों).*(\bcall|\bmeet|\bem\b|\bemergency|\bbula|मीटिंग)|(\bcall|\bmeet|\bem\b|\bemergency|\bbula).*(\bwhy\b|\bkyu)/i;
 const NEGATED_SUS_RX = /\b(no|not|nobody|no one|noone|nothing|koi nahi|kisi pe nahi)\b[^.?!]{0,14}\b(sus|suspect|suspicious|kill|kills|killed|shak)/i;
@@ -727,4 +754,4 @@ function aiStatus() {
   return API_KEY ? `NEAR AI Cloud (${MODEL})` : "rule-based fallback (set NEAR_AI_API_KEY to use NEAR AI Cloud)";
 }
 
-module.exports = { tick, onChat, aiStatus, aiStats, detectLanguage, learnFromMatch, _internal: { fallbackThink, buildContext, systemPrompt, userPrompt, memoryLines } };
+module.exports = { tick, onChat, aiStatus, aiStats, detectLanguage, learnFromMatch, _internal: { fallbackThink, buildContext, systemPrompt, userPrompt, memoryLines, think } };

@@ -12282,6 +12282,7 @@ io.on("connection", (socket) => {
     // mission report or kill. Now always leaves at least 2 crewmates.
     let saboteurCount = imposterCount || 1;
     saboteurCount = Math.max(1, Math.min(saboteurCount, playerIds.length - 2));
+    room.saboteurCountStart = saboteurCount; // [AI BOTS] public: bots use it to know when skipping would lose the game
 
     // [NEW FEATURE - HOST CONTROL PANEL] Speed is now a direct movement
     // multiplier - 0.5x to 2x across 7 slider stops. Snapped here too,
