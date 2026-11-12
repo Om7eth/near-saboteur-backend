@@ -258,16 +258,39 @@ function evidenceLines(room, botId, memory, now) {
   // 4) Detective notebook: score each living suspect from the facts + claims.
   const roomNames = Object.values(B.ROOM_NAME || {});
   const score = {}, why = {}, liars = [];
-  const add = (n, v, r) => { score[n] = (score[n] || 0) + v; (why[n] = why[n] || []).push(r); };
+  const best = {};
+  const add = (n, v, r) => { score[n] = (score[n] || 0) + v; (why[n] = why[n] || []).push(r); if (v > 0 && (!best[n] || v > best[n][0])) best[n] = [v, r]; };
   const latest = bodies[bodies.length - 1];
   if (latest) {
     const lastAlive = [...memory].reverse().find((m) => m.kind === "saw" && m.name === latest.victim && m.t <= latest.foundAt);
     const from = lastAlive ? lastAlive.t : latest.foundAt - 90000;
     const inWindow = memory.filter((m) => m.kind === "saw" && m.t >= from && m.t <= latest.foundAt);
-    for (const m of inWindow) if (latest.where && m.where === latest.where && m.name !== latest.victim) add(m.name, 2, `you saw them in the body's room (${latest.where})`);
-    // [BOT VOTES] seen right where the body was, just before it was found = strong evidence
-    const close = new Set(inWindow.filter((m) => latest.where && m.where === latest.where && m.name !== latest.victim && latest.foundAt - m.t <= 20000).map((m) => m.name));
-    for (const n of close) add(n, 1.5, `you saw them in ${latest.where} only seconds before the body was found`);
+    // [BOT EVIDENCE] Being in the same room is weak on its own; the strong signals are
+    // who stood right at the body, who walked off, and who was last alone with the victim.
+    const inRoom = new Set(inWindow.filter((m) => latest.where && m.where === latest.where && m.name !== latest.victim).map((m) => m.name));
+    for (const n of inRoom) add(n, 1, `you saw them in the body's room (${latest.where})`);
+    const atBody = memory.filter((m) => m.kind === "at-body" && m.victim === latest.victim && m.name !== me.name).sort((a, b) => a.dist - b.dist);
+    if (atBody.length) {
+      const c = atBody[0], d = atBody[1];
+      if (c.dist <= 3 && d && d.dist <= 3 && d.dist - c.dist < 1) { add(c.name, 1.5, `they were right at the body (so was ${d.name})`); add(d.name, 1.5, `they were right at the body (so was ${c.name})`); }
+      else if (c.dist <= 3) add(c.name, 3, `you saw them standing right next to ${latest.victim}'s body`);
+      else add(c.name, 1.5, `they were the closest to ${latest.victim}'s body when you found it`);
+      for (const m of atBody) if (m.away) add(m.name, 1, `they were walking away from the body`);
+      for (const m of atBody.slice(1)) if (!(d && m === d && c.dist <= 3 && d.dist <= 3 && d.dist - c.dist < 1)) add(m.name, 0.5, `they were also near the body`);
+    }
+    for (const m of memory.filter((x) => x.kind === "fled" && x.victim === latest.victim)) add(m.name, 2, `they left ${m.from} right after, into ${m.to}, without reporting`);
+    const lastWithVictim = [...memory].reverse().find((m) => m.kind === "saw" && m.name === latest.victim && m.t <= latest.foundAt);
+    if (lastWithVictim && Array.isArray(lastWithVictim.with)) {
+      if (lastWithVictim.with.length === 1) add(lastWithVictim.with[0], latest.foundAt - lastWithVictim.t <= 60000 ? 3 : 2, `you last saw ${latest.victim} alone with them (${lastWithVictim.where})`);
+      else for (const n of lastWithVictim.with) add(n, 0.5, `they were with ${latest.victim} when you last saw them alive`);
+    }
+    const reporter = meeting.reportedBodyId && meeting.calledBy && room.players[meeting.calledBy];
+    if (reporter && reporter !== me) add(reporter.name, -1, `they reported the body`);
+    for (const [, p] of Object.entries(room.players)) {
+      if (p === me || p.alive === false || inRoom.has(p.name) || atBody.some((m) => m.name === p.name)) continue;
+      const alibi = memory.find((m) => m.kind === "saw" && m.name === p.name && latest.where && m.where !== latest.where && latest.foundAt - m.t <= 15000 && m.t <= latest.foundAt);
+      if (alibi) add(p.name, -2, `you saw them in ${alibi.where} right before the body was found`);
+    }
     // claims about the latest death
     const ejectRole = {}; for (const e of room.ejections || []) ejectRole[e.name] = e.role;
     for (const e of meeting.messages || []) {
@@ -293,10 +316,13 @@ function evidenceLines(room, botId, memory, now) {
   for (const l of liars) out.push(l);
   const ranked = Object.entries(score).filter(([n]) => n !== me.name && Object.values(room.players).some((p) => p.name === n && p.alive !== false)).sort((a, b) => b[1] - a[1]);
   const top = ranked[0];
-  if (top && top[1] >= 3) out.push(`YOUR READ: ${top[0]} is very likely a saboteur (${why[top[0]].join("; ")}). Say why and vote ${top[0]}.`);
+  const second = ranked[1];
+  const clear = top && top[1] >= 3 && (!second || top[1] - second[1] >= 1.5); // [BOT EVIDENCE] only a clear leader, never two people at once
+  if (clear) out.push(`YOUR READ: ${top[0]} is very likely a saboteur (${why[top[0]].join("; ")}). Say why and vote ${top[0]}.`);
+  else if (top && top[1] >= 3 && second) out.push(`YOUR READ: it's between ${top[0]} and ${second[0]} - ask both ONE specific question (where were you, what were you doing) before voting; vote skip unless one of them can't answer.`);
   else if (top && top[1] > 0) out.push(`YOUR READ: leaning ${top[0]} (${why[top[0]].join("; ")}) but not enough yet - ask ${top[0]} or the accuser ONE specific question; vote skip unless more comes out.`);
   else out.push("YOUR READ: nothing points to anyone yet - ask a specific question or share what you saw; vote skip.");
-  evidenceLines.last = { ranked: ranked.filter(([, v]) => v > 0).map(([n]) => n), voteFor: top && top[1] >= 3 ? top[0] : null, liars: liars.length ? Object.keys(score).filter((n) => score[n] >= 2 && why[n].some((r) => r.includes("contradicts"))) : [] };
+  evidenceLines.last = { ranked: ranked.filter(([, v]) => v > 0).map(([n]) => n), voteFor: clear ? top[0] : null, voteWhy: clear && best[top[0]] ? best[top[0]][1] : null, voteWhyAll: clear ? why[top[0]] : null, liars: liars.length ? Object.keys(score).filter((n) => score[n] >= 2 && why[n].some((r) => r.includes("contradicts"))) : [] };
   if (bodies.length && skipLoses(room)) out.push("ENDGAME: so few players are left that if nobody is voted out, the saboteur wins with the next kill. Do NOT vote skip: vote your best suspect and say why.");
   return out.slice(-10);
 }
@@ -385,6 +411,8 @@ const LINES = {
     sawKill: (k, v, w, cam) => `${cam ? "on cams i" : "i"} saw ${k} kill ${v} in ${w}!! vote ${k}`,
     body: (v, w) => `found ${v} dead in ${w}`,
     near: (who, w) => `${who} was around ${w} not long before`,
+    nextTo: (who, w) => `i saw ${who} standing right next to the body in ${w}. vote ${who}`,
+    fled: (who, w) => `${who} was at the body in ${w} and walked off without reporting. vote ${who}`,
     alibi: (w, what) => `wasn't me, i was in ${w} doing ${what}`,
     nothing: () => pick(["no idea tbh, i was doing tasks", "didn't see anything, anyone?", "where was everyone?"]),
     suspectSay: (who) => `${who} is acting kinda sus ngl`,
@@ -394,6 +422,8 @@ const LINES = {
     sawKill: (k, v, w, cam) => `${cam ? "camera pe" : "maine"} dekha ${k} ne ${v} ko ${w} mein maara!! ${k} ko vote karo`,
     body: (v, w) => `${v} ki body ${w} mein mili`,
     near: (who, w) => `${who} thodi der pehle ${w} ke paas tha`,
+    nextTo: (who, w) => `maine ${who} ko ${w} mein body ke bilkul paas khada dekha. ${who} ko vote karo`,
+    fled: (who, w) => `${who} ${w} mein body ke paas tha aur bina report kiye nikal gaya. ${who} ko vote karo`,
     alibi: (w, what) => `main nahi tha bhai, main ${w} mein ${what} kar raha tha`,
     nothing: () => pick(["pata nahi yaar, main tasks kar raha tha", "maine kuch nahi dekha, kisi ne dekha?", "sab log kahan the?"]),
     suspectSay: (who) => `${who} thoda sus lag raha hai`,
@@ -403,6 +433,8 @@ const LINES = {
     sawKill: (k, v, w, cam) => `${cam ? "कैमरे पर" : "मैंने"} देखा ${k} ने ${v} को ${w} में मारा! ${k} को वोट करो`,
     body: (v, w) => `${v} की बॉडी ${w} में मिली`,
     near: (who, w) => `${who} थोड़ी देर पहले ${w} के पास था`,
+    nextTo: (who, w) => `मैंने ${who} को ${w} में बॉडी के बिल्कुल पास देखा। ${who} को वोट करो`,
+    fled: (who, w) => `${who} ${w} में बॉडी के पास था और बिना रिपोर्ट किए चला गया। ${who} को वोट करो`,
     alibi: (w, what) => `मैं नहीं था, मैं ${w} में ${what} कर रहा था`,
     nothing: () => pick(["पता नहीं, मैं टास्क कर रहा था", "मैंने कुछ नहीं देखा", "सब कहाँ थे?"]),
     suspectSay: (who) => `${who} थोड़ा संदिग्ध लग रहा है`,
@@ -429,9 +461,11 @@ function fallbackThink(ctx, memory, alreadySaid, mentioned) {
   const body = [...memory].reverse().find((m) => m.kind === "body");
   if (body && !alreadySaid.length) {
     // Who did we see near that spot shortly before finding the body?
-    const near = memory.filter((m) => m.kind === "saw" && m.where === body.where && body.t - m.t < 45000 && m.t <= body.t && aliveNames.has(m.name) && m.name !== ctx.me.name);
-    const who = near.length ? near[near.length - 1].name : null;
-    return { say: who ? `${L.body(body.name, body.where)}, ${L.near(who, body.where)}` : L.body(body.name, body.where), vote: who || "skip" };
+    const who = ctx.read && ctx.read.voteFor && aliveNames.has(ctx.read.voteFor) ? ctx.read.voteFor : null;
+    const close = who && memory.some((m) => m.kind === "at-body" && m.name === who && m.victim === body.name && m.dist <= 3);
+    const fled = who && memory.some((m) => m.kind === "fled" && m.name === who && m.victim === body.name);
+    const why = !who ? "" : close ? L.nextTo(who, body.where) : fled ? L.fled(who, body.where) : L.near(who, body.where);
+    return { say: who ? `${L.body(body.name, body.where)}. ${why}` : L.body(body.name, body.where), vote: who || "skip" };
   }
   if (mentioned) return { say: lastDid ? L.alibi(lastDid.where, lastDid.what) : L.nothing(), vote: "skip" };
   return { say: alreadySaid.length ? "" : (chance(0.6) ? L.nothing() : ""), vote: "skip" };
@@ -509,7 +543,7 @@ async function think(room, roomCode, botId, memory, bs, now, st, purpose) {
   // [DETECTIVE] the code's read wins on the vote: strong case -> vote it; never vote out someone the facts clear
   if (ctx.read && !ctx.isSab) {
     const idOf = (n) => { const h = Object.entries(room.players).find(([id, p]) => p.alive !== false && id !== botId && p.name === n); return h ? h[0] : null; };
-    if (ctx.read.voteFor && vote === "skip") vote = idOf(ctx.read.voteFor) || vote;
+    if (ctx.read.voteFor) vote = idOf(ctx.read.voteFor) || vote; // [BOT EVIDENCE] the evidence decides, not a guess
     if (vote !== "skip" && room.players[vote] && !ctx.read.voteFor && !(ctx.read.liars || []).includes(room.players[vote].name)) {
       const kill = memory.some((m) => m.kind === "kill" && m.name === room.players[vote].name);
       if (!kill) vote = "skip"; // not enough evidence yet

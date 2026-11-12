@@ -134,6 +134,15 @@ function visiblePlayers(room, id, p) {
 function perceive(room, id, p, brain, now) {
   const seen = visiblePlayers(room, id, p);
   const here = roomNameAt(p.x, p.y);
+  brain.prevPos = brain.prevPos || {};
+  // [BOT EVIDENCE] someone this bot saw standing at a body is now in another room: they walked off
+  for (const oid of seen) {
+    const o = room.players[oid];
+    const at = [...brain.memory].reverse().find((m) => m.kind === "at-body" && m.who === oid && now - m.t < 20000);
+    if (at && roomNameAt(o.x, o.y) !== at.where && !brain.memory.some((m) => m.kind === "fled" && m.who === oid && m.victim === at.victim)) {
+      remember(brain, { kind: "fled", who: oid, name: o.name, victim: at.victim, from: at.where, to: roomNameAt(o.x, o.y) });
+    }
+  }
   for (const oid of seen) {
     const last = brain.lastSeen[oid] || 0;
     if (now - last > 6000) {
@@ -142,6 +151,8 @@ function perceive(room, id, p, brain, now) {
     }
     brain.lastSeen[oid] = now;
   }
+  const prev = brain.prevPos; brain.prevPos = {};
+  for (const oid of seen) { const o = room.players[oid]; brain.prevPos[oid] = { x: o.x, y: o.y }; }
   // Watching cameras at the Security Hub: same feeds a human gets.
   if (brain.mode === "cameras" && brain.watchUntil > now) {
     for (const [oid, o] of Object.entries(room.players)) {
@@ -160,7 +171,17 @@ function perceive(room, id, p, brain, now) {
     const onCam = brain.mode === "cameras" && brain.watchUntil > now && cameraFor(pt);
     if (canSeePoint(room, p, pt) || onCam) {
       if (!brain.memory.some((m) => m.kind === "body" && m.who === oid)) {
-        remember(brain, { kind: "body", who: oid, name: o.name, where: onCam ? onCam.label : roomNameAt(o.bodyX, o.bodyY), via: onCam ? "camera" : "eyes" });
+        const where = onCam ? onCam.label : roomNameAt(o.bodyX, o.bodyY);
+        remember(brain, { kind: "body", who: oid, name: o.name, where, via: onCam ? "camera" : "eyes" });
+        // [BOT EVIDENCE] who was standing at the body, how close, and were they walking away?
+        for (const sid of seen) {
+          const s = room.players[sid];
+          const dist = Math.hypot(s.x - o.bodyX, s.y - o.bodyY) / T;
+          if (dist > 6) continue;
+          const pv = prev[sid];
+          const away = !!(pv && Math.hypot(s.x - o.bodyX, s.y - o.bodyY) - Math.hypot(pv.x - o.bodyX, pv.y - o.bodyY) > T * 0.3);
+          remember(brain, { kind: "at-body", who: sid, name: s.name, victim: o.name, where: roomNameAt(s.x, s.y), dist: Math.round(dist * 10) / 10, away });
+        }
       }
       if (p.role === "crewmate" && !brain.pendingBody) brain.pendingBody = oid;
     }
