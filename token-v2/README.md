@@ -25,6 +25,13 @@
 - **Rules can't change quietly.** The owner (a cold key) can only `propose_rules`. A proposal is public and applies after **7 days**, inside hard bounds checked by the contract (for example a multiplier of at most 3x, and no reward above 10,000).
 - **v1 → v2 migration.** Every v1 balance (39 holders, 36,573 tokens) was copied once, then `finish_migration` closed it forever. The migration is capped at 2M tokens.
 
+## Limits (stated plainly)
+
+- **The game server is a trusted reporter.** Matches are played off-chain, so the game account reports who placed where and how many real players there were. The contract decides every amount, accepts each match id once, and caps everything with the weekly budget. A leaked game key can at most pay out this week's budget, and can never change the rules.
+- **Sybil resistance (good enough for a demo):** full rewards need 4+ real players in a match (1 player + bots earns 1%, bots-only earns 0). After 5 matches a day an account earns 25%. Guests and players who leave early earn nothing (enforced by the game). Burns from bot-only catches are 1%. Someone with many accounts in one room could still farm up to the weekly budget.
+- **Admin key:** there is no instant admin. The owner (a cold key, not on the server) can only *propose* new rules. They apply after a public 7-day timelock, inside hard limits checked by the contract. The contract account itself still has a cold key so a bug could be fixed; we plan to remove it (making the code immutable) after an external audit.
+- **Testnet only**, by choice: no cash value, nothing promised.
+
 ## Methods
 
 - **Game account:** `reward_match(match_id, humans, results[{account_id, rank, play_pass}])`, `catch_ritual(match_id, humans)`, `reward_referral(referral_id, account_id)`.
