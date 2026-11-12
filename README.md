@@ -95,6 +95,7 @@ Every week the top 3 on the weekly Ranks get **real NEAR on mainnet**. An agent 
   - The USD prize is converted at the live NEAR price.
   - Ties go to whoever reached the score first.
   - Held or banned accounts are skipped.
+  - The game's own founder and test accounts can't win (`WEEKLY_EXCLUDE`, default `om7eth`). They show a DEV tag on the Ranks page.
 - **No double payments:** every payment's `Idempotency-Key` is saved before it is sent. A lost response is retried with the same key.
 - **No wallet yet?** The prize waits 30 days and is paid automatically once the player adds a prize wallet (Ranks → prize wallet).
 - **Notifications:**
