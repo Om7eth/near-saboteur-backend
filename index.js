@@ -9308,6 +9308,17 @@ function snapToSpeedStep(value) {
 // discussion from earlier meetings stays visible until the match ends.
 // Cleared at game start / return to lobby, like ghost chat.
 const MATCH_CHAT_MAX = 400;
+// [CHAT FIX] A reconnect gives the player a new socket.id. Chat history is
+// keyed by the sender's socket.id, so their own old messages came back on the
+// wrong side ("someone else") after a reload. Move them to the new id too.
+function remapChatSender(room, oldId, newId) {
+  if (!room || !oldId || !newId || oldId === newId) return;
+  const lists = [room.lobbyChat, room.matchChat, room.ghostChat, room.meeting && room.meeting.messages];
+  for (const list of lists) {
+    if (!Array.isArray(list)) continue;
+    for (const m of list) if (m && m.senderId === oldId) m.senderId = newId;
+  }
+}
 function pushMatchChat(room, entry) {
   room.matchChat = room.matchChat || [];
   room.matchChat.push(entry);
@@ -10564,6 +10575,7 @@ io.on("connection", (socket) => {
       delete playerData.disconnectedAt;
       delete room.players[oldId];
       room.players[socket.id] = playerData;
+      remapChatSender(room, oldId, socket.id); // [CHAT FIX]
       const oldSocket = io.sockets.sockets.get(oldId);
       if (oldSocket && oldSocket.connected) { oldSocket.emit("sessionMovedElsewhere"); oldSocket.disconnect(true); }
     } else if (!oldId) {
@@ -11153,6 +11165,7 @@ io.on("connection", (socket) => {
       delete playerData.disconnectedAt;
       delete room.players[oldId];
       room.players[socket.id] = playerData;
+      remapChatSender(room, oldId, socket.id); // [CHAT FIX]
       restoreHostToCreatorIfPresent(room);
       cancelRoomEmptyClose(room.code);
 
