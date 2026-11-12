@@ -1,14 +1,27 @@
 # NEAR Saboteur — backend
 
-Node / Express / Socket.io server for NEAR Saboteur, plus the pool escrow contract (`contract/`, Rust).
+Node / Express / Socket.io server for NEAR Saboteur, plus two Rust contracts: the pool escrow (`contract/`) and the $SABOTEUR v2 token (`token-v2/`).
 
-**NEAR Hackathon (Games With Real Economies):** the main submission README, with the feature list and prior-work disclosure, is in the frontend repo: https://github.com/Om7eth/near-saboteur-frontend
+**NEAR Hackathon (Games With Real Economies · Memecoins With Mechanics · Agent Economy):** the main submission README, with the feature list and prior-work disclosure, is in the frontend repo: https://github.com/Om7eth/near-saboteur-frontend
 
 - **Live game:** https://nearsaboteur.com
-- **Baseline before the hackathon:** commit [`25b6b99`](https://github.com/Om7eth/near-saboteur-backend/commit/25b6b99) (6 Oct 2026), tagged `pre-hackathon`.
-- **Hackathon work:** [compare `pre-hackathon...hackathon-submission`](https://github.com/Om7eth/near-saboteur-backend/compare/pre-hackathon...hackathon-submission)
+- **Baseline before the hackathon:** commit [`25b6b99`](https://github.com/Om7eth/near-saboteur-backend/commit/25b6b99) (6 Oct 2026).
+- **Hackathon work:** [compare `25b6b99...main`](https://github.com/Om7eth/near-saboteur-backend/compare/25b6b99...main)
 - **AI tools:** much of the code was written with the help of Claude (Claude Code), directed, reviewed and tested by the founder.
 - **License:** MIT, see [LICENSE](LICENSE).
+
+## Run locally and test
+
+```bash
+npm install
+cp .env.example .env        # every value is optional: missing ones switch that feature off
+npm start                   # http://localhost:3000  (the frontend expects it here)
+npm test                    # AI bot detective rules (no DB, keys or network needed)
+cd contract && cargo test   # pool escrow v4: 28 unit tests
+cd token-v2 && cargo test   # $SABOTEUR v2 token: 20 unit tests
+```
+
+The server starts with no env at all and logs which features are off (database, admin, pools, Telegram, token). Keys stay server-side; nothing secret is in this repo.
 
 ### Also in this backend (hackathon work)
 - **Telegram bot** (`/telegram-webhook`): one auto-updating banner post per public room, commands `/play /rooms /live /ranks /help /subscribe /unsubscribe`, weekly-prize announcements. Off unless `TELEGRAM_PAUSED=0`. Topics: `TELEGRAM_TOPIC_ID` (rooms, default 349), `TELEGRAM_ANNOUNCE_TOPIC_ID` (default 4).
@@ -81,7 +94,7 @@ The lobby **Standings** board shows each player's line for every match: role, wo
 
 ## Weekly Rewards Agent (NEAR Intents)
 
-Every week the top 3 on the weekly Ranks get **real NEAR on mainnet**. An agent account on NEAR Intents pays them, through the [NEAR Intents Agent API](https://partners.demo.agentsonintents.com/). The code is in `economy/weeklyAgent.js`, and the admin page is Admin → Weekly rewards.
+Every week the top 3 on the weekly Ranks get **real NEAR on mainnet**. An agent account on NEAR Intents pays them, through the [NEAR Intents Agent API](https://api.demo.agentsonintents.com/llms.txt). The code is in `economy/weeklyAgent.js`, and the admin page is Admin → Weekly rewards.
 
 - **The owner is `saboteur.near`.** It signs the agent's rules once in the admin page, with its own wallet through NEAR Connect. The game server never holds its key.
 - **The rules (policy):**

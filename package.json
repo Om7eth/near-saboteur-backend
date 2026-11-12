@@ -4,7 +4,8 @@
   "description": "Backend server for NEAR Saboteur Telegram Mini App",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "test": "node --test tests/bots.test.js"
   },
   "dependencies": {
     "express": "^4.19.2",
