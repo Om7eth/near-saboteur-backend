@@ -250,6 +250,12 @@ function errText(e) {
 }
 
 // ---------------- leaders ----------------
+// Accounts that can never win the weekly prize: the game's own founder /
+// test accounts. Set WEEKLY_EXCLUDE="name1,name2" to change (usernames).
+const EXCLUDED = new Set(String(process.env.WEEKLY_EXCLUDE ?? "om7eth").split(",").map((x) => x.trim().toLowerCase()).filter(Boolean));
+function isExcluded(p) {
+  return EXCLUDED.has(String(p.username || "").toLowerCase()) || EXCLUDED.has(String(p.name || "").toLowerCase());
+}
 async function leaders(start, end, n = 3) {
   const match = { earnedAt: { $gte: start } };
   if (end) match.earnedAt.$lt = end;
@@ -266,6 +272,7 @@ async function leaders(start, end, n = 3) {
   for (const r of rows) {
     const p = byId.get(String(r._id));
     if (!p || p.accountHeld) continue; // deleted or held/banned accounts can't win
+    if (isExcluded(p)) continue; // the game's own (founder / test) accounts never win the prize
     out.push({ playerId: p._id, name: p.name, username: p.username, points: r.points, wallet: walletOf(p) });
     if (out.length >= n) break;
   }
