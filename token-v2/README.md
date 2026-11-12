@@ -29,8 +29,21 @@
 
 - **The game server is a trusted reporter.** Matches are played off-chain, so the game account reports who placed where and how many real players there were. The contract decides every amount, accepts each match id once, and caps everything with the weekly budget. A leaked game key can at most pay out this week's budget, and can never change the rules.
 - **Sybil resistance (good enough for a demo):** full rewards need 4+ real players in a match (1 player + bots earns 1%, bots-only earns 0). After 5 matches a day an account earns 25%. Guests and players who leave early earn nothing (enforced by the game). Burns from bot-only catches are 1%. Someone with many accounts in one room could still farm up to the weekly budget.
-- **Admin key:** there is no instant admin. The owner (a cold key, not on the server) can only *propose* new rules. They apply after a public 7-day timelock, inside hard limits checked by the contract. The contract account itself still has a cold key so a bug could be fixed; we plan to remove it (making the code immutable) after an external audit.
+- **No one can change the code.** The contract account `sabo.saboteur.testnet` has **0 access keys** (its only key was deleted on 12 Nov 2026, tx `BKngCdhS11HRJci2of97Fx6PK7ryM4PoDKctUt3n775i`). Nobody can redeploy it, not even us.
+- **No instant admin.** The owner (a cold key, not on the server) can only *propose* new rules. They apply after a public 7-day timelock, inside hard limits checked by the contract.
 - **Testnet only**, by choice: no cash value, nothing promised.
+
+## 60-day supply simulation
+
+`python3 token-v2/simulate.py` runs the contract's exact rules over 60 days for three community sizes (standard library only). Day 60:
+
+| Community | Matches a day (real players) | Earned by players | Burned by catches | Burned for Play Pass | Total supply | Days the weekly budget ran out |
+|---|---|---|---|---|---|---|
+| Today (small) | 10 (~2) | 233,823 | 37,630 | 0 | 999,962,370 | 0 |
+| Growing | 60 (~4) | 2,128,333 | 1,198,630 | 360,000 | 998,441,370 | 43 |
+| Busy | 250 (~6) | 5,446,523 | 6,756,200 | 1,800,000 | 991,443,800 | 59 |
+
+What it shows: supply only goes down, burns grow faster than rewards as more real people play, and the weekly budget is what stops farming. At 60+ full matches a day the budget runs out late in the week, so a growing community would raise `weekly_base_budget` through the public 7-day timelock.
 
 ## Methods
 
