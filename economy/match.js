@@ -149,8 +149,34 @@ async function settleMatch({ io, roomCode, room, computePoints, hasDb }) {
   }
 }
 
+// [$SABOTEUR v2] The game only REPORTS the match; the contract computes and
+// pays every amount, and refuses a match id it has seen (so a retry can never
+// pay twice). The ledger keeps what the contract actually paid.
+async function payPendingV2(docs, matchId) {
+  const ids = docs.map((d) => d._id);
+  let res;
+  if (String(matchId).startsWith("referral:")) {
+    const d = docs[0];
+    res = await T.rewardReferral(String(matchId).slice("referral:".length), d.wallet);
+    if (res.ok && !res.already && typeof res.amount === "number") await TokenLedger.updateOne({ _id: d._id }, { $set: { amount: res.amount } }).catch(() => {});
+  } else {
+    const seen = new Set(), list = [], twice = [];
+    for (const d of docs) { if (seen.has(d.wallet)) twice.push(d._id); else { seen.add(d.wallet); list.push(d); } }
+    if (twice.length) await TokenLedger.updateMany({ _id: { $in: twice } }, { $set: { status: "skipped", error: "same wallet twice in one match" } }).catch(() => {});
+    if (!list.length) return;
+    res = await T.reportMatch(matchId, list[0].humans || 0, list.map((d) => ({ wallet: d.wallet, rank: d.rank >= 1 && d.rank <= 3 ? d.rank : 0, playPass: !!d.playPass })));
+    if (res.ok && Array.isArray(res.amounts)) await Promise.all(list.map((d, i) => TokenLedger.updateOne({ _id: d._id }, { $set: { amount: res.amounts[i] } }).catch(() => {})));
+    ids.length = 0; ids.push(...list.map((d) => d._id));
+  }
+  await TokenLedger.updateMany({ _id: { $in: ids } },
+    res.ok ? { $set: { status: "sent", ...(res.txHash ? { txHash: res.txHash } : {}), error: null } } : { $set: { status: "failed", error: res.error } },
+  ).catch(() => {});
+  if (res.ok) console.log(`[SABOTEUR v2] ${matchId}: ${res.already ? "already recorded" : `paid by the contract (tx ${res.txHash})`}`);
+}
+
 async function payPending(docs, matchId) {
   if (!docs.length) return;
+  if (T.V2) return payPendingV2(docs, matchId);
   const ids = docs.map((d) => d._id);
   const prior = docs.find((d) => d.signedTx && d.txHash);
   const res = await T.payMatch(docs.map((d) => ({ wallet: d.wallet, amount: d.amount })), `match ${matchId}`, {
@@ -221,7 +247,7 @@ async function botsSummary(botNames) {
   }));
   const data = {
     token: "SABOTEUR", network: "testnet", tokenContract: T.TOKEN, tokenUrl: T.TOKEN ? `https://testnet.nearblocks.io/token/${T.TOKEN}` : null,
-    treasury: T.TREASURY, treasuryBalance: T.configured() ? await T.balanceOf(T.TREASURY) : null,
+    treasury: T.TREASURY, treasuryBalance: T.configured() && !T.V2 ? await T.balanceOf(T.TREASURY) : null, // v2: the reserve is inside the contract
     botTreasury: T.BOT_TREASURY, botTreasuryBalance: T.configured() ? await T.balanceOf(T.BOT_TREASURY) : null, botCap: RULES.botBalanceCap, bots,
   };
   botCache = { at: Date.now(), data };
@@ -245,7 +271,7 @@ async function adminSummary() {
   const rewardsBalance = T.configured() ? await T.balanceOf(T.REWARDS) : null;
   return {
     token: T.TOKEN, treasury: T.TREASURY, treasuryBalance: T.configured() ? await T.balanceOf(T.TREASURY) : null,
-    rewards: T.REWARDS, rewardsBalance, rewardsLow: rewardsBalance != null && rewardsBalance < RULES.rewardsLowWarning,
+    rewards: T.REWARDS, rewardsBalance, rewardsLow: !T.V2 && rewardsBalance != null && rewardsBalance < RULES.rewardsLowWarning, v2: T.V2 ? await T.v2Stats().catch(() => null) : null,
     botTreasury: T.BOT_TREASURY, botTreasuryBalance: T.configured() ? await T.balanceOf(T.BOT_TREASURY) : null,
     totals, last24: last24.map((x) => ({ holderType: x._id, amount: x.amount, matches: x.matches.length })), topPlayers, farmFlags: farm,
     rules: RULES,
@@ -264,4 +290,32 @@ async function payReferral({ referrerId, name, friendId, amount }) {
   if (wallet) payPending([doc], matchId).catch(() => {});
 }
 
-module.exports = { payReferral, recordBack, backVoteAllowed, backDelta, backsFor, settleMatch, startRetryLoop, playerSummary, botsSummary, adminSummary, TokenLedger };
+// ---- [$SABOTEUR v2] "Catch = burn" + the public event feed ----
+const eventSchema = new mongoose.Schema({
+  kind: { type: String, index: true }, // "catch" | "pass"
+  matchId: String, roomCode: String, name: String, amount: Number, txHash: String,
+  createdAt: { type: Date, default: Date.now, index: true },
+});
+const SaboEvent = mongoose.models.SaboEvent || mongoose.model("SaboEvent", eventSchema);
+
+// The crew voted out a real saboteur: the contract burns from its Ritual Pool.
+// Fire-and-forget; the room gets "saboteurBurn" once the burn is on-chain.
+function catchBurn({ io, roomCode, room, ejectedId, hasDb }) {
+  if (!T.configured() || !T.V2) return;
+  const p = room.players[ejectedId];
+  if (!p || p.role !== "saboteur") return;
+  const humans = Object.values(room.players).filter((x) => x && !x.isBot && !x.spectator && x.role).length;
+  const matchId = `${room.currentMatchId || roomCode}:${ejectedId}`;
+  T.catchRitual(matchId, humans).then(async (res) => {
+    if (!res.ok || res.already) { if (!res.ok) console.warn("[SABOTEUR v2] catch burn failed:", res.error); return; }
+    const amount = res.burned || 0;
+    if (hasDb) await SaboEvent.create({ kind: "catch", matchId, roomCode, name: p.name, amount, txHash: res.txHash }).catch(() => {});
+    io.to(roomCode).emit("saboteurBurn", { name: p.name, amount, txUrl: res.txHash ? T.explorerTx(res.txHash) : null });
+  }).catch(() => {});
+}
+async function recentEvents(limit = 8) {
+  const rows = await SaboEvent.find().sort({ createdAt: -1 }).limit(limit).lean().catch(() => []);
+  return rows.map((r) => ({ kind: r.kind, name: r.name, roomCode: r.roomCode, amount: r.amount, txUrl: r.txHash ? T.explorerTx(r.txHash) : null, at: r.createdAt }));
+}
+
+module.exports = { catchBurn, recentEvents, SaboEvent, payReferral, recordBack, backVoteAllowed, backDelta, backsFor, settleMatch, startRetryLoop, playerSummary, botsSummary, adminSummary, TokenLedger };

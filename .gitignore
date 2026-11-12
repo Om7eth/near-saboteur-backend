@@ -9,3 +9,4 @@ node_modules/
 # OS
 .DS_Store
 contract/target/
+token-v2/target/

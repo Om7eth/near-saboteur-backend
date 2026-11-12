@@ -20,7 +20,11 @@ const PARENT = process.env.SABOTEUR_PARENT_ACCOUNT_ID || "";
 const KEY = process.env.SABOTEUR_PARENT_PRIVATE_KEY || "";
 const RPC_URL = process.env.SABOTEUR_RPC_URL || "https://test.rpc.fastnear.com";
 const DECIMALS = 18n;
-const TOKEN = PARENT ? `token.${PARENT}` : "";
+// [$SABOTEUR v2] The game now uses the v2 contract (token-v2/), where the
+// reward / burn rules live in the contract. v1 (token.<parent>) is retired;
+// every v1 balance was copied into v2 once (scripts/deploy-saboteur-v2.mjs).
+const TOKEN = process.env.SABOTEUR_TOKEN_ID || (PARENT ? `sabo.${PARENT}` : "");
+const V2 = /^sabo\./.test(TOKEN);
 const TREASURY = PARENT ? `treasury.${PARENT}` : "";
 const REWARDS = PARENT ? `rewards.${PARENT}` : "";
 const BOT_TREASURY = PARENT ? `bots.${PARENT}` : "";
@@ -84,7 +88,7 @@ async function ensureWallet(id) {
     const prefix = id.slice(0, -(PARENT.length + 1));
     await parent.createSubAccount({ accountOrPrefix: prefix, publicKey, nearToTransfer: near.nearToYocto("0.01") });
   }
-  const reg = await view("storage_balance_of", { account_id: id });
+  const reg = V2 ? true : await view("storage_balance_of", { account_id: id }); // v2 registers holders itself
   if (!reg) {
     const bounds = await view("storage_balance_bounds", {});
     await parent.callFunction({
@@ -168,12 +172,111 @@ function payMatch(payouts, memo, opts = {}) {
   });
 }
 
+// ---------------- v2: the contract decides every amount ----------------
+const B64 = (v) => { try { return JSON.parse(Buffer.from(v, "base64").toString()); } catch { return null; } };
+const ALREADY = /Already recorded/;
+// One function call from `signer` (an Account) on the v2 contract. Returns
+// { ok, txHash, value, already } - `already` = the contract had recorded this
+// id before (a retry of something that already landed: never paid twice).
+async function callV2(signer, method, args, { gas = "60", deposit = 0n } = {}) {
+  const { near, provider } = await chain();
+  try {
+    const publicKey = await signer.signer.getPublicKey();
+    const tx = await signer.createTransaction({ receiverId: TOKEN, actions: [near.actions.functionCall(method, args, near.teraToGas(gas), deposit)], publicKey });
+    const { txHash: h, signedTransaction } = await signer.signer.signTransaction(tx);
+    const txHash = near.baseEncode(h);
+    const res = await provider.sendTransactionUntil(signedTransaction, "EXECUTED_OPTIMISTIC");
+    const st = res && res.status;
+    if (st && st.Failure) {
+      let full = ""; try { full = JSON.stringify(st.Failure); } catch { /* keep empty */ }
+      return ALREADY.test(full) ? { ok: true, already: true, txHash } : { ok: false, error: failureText(st.Failure), txHash };
+    }
+    return { ok: true, txHash, value: st && typeof st.SuccessValue === "string" ? B64(st.SuccessValue) : null };
+  } catch (e) {
+    const msg = String(e.message || e);
+    return ALREADY.test(msg) ? { ok: true, already: true } : { ok: false, error: msg.slice(0, 300) };
+  }
+}
+const units = (n) => toUnits(n);
+// results: [{ wallet, rank (1-3, 0 = finished), playPass }]. Amounts come back from the contract.
+function reportMatch(matchId, humans, results) {
+  if (!configured() || !V2) return Promise.resolve({ ok: false, error: "v2 not configured" });
+  return enqueue(async () => {
+    const { rewards } = await chain();
+    for (const r of results) await ensureWallet(r.wallet);
+    const res = await callV2(rewards, "reward_match", {
+      match_id: String(matchId).slice(0, 70), humans: Math.min(16, humans),
+      results: results.map((r) => ({ account_id: r.wallet, rank: r.rank, play_pass: !!r.playPass })),
+    }, { gas: "120" });
+    if (res.ok && Array.isArray(res.value)) res.amounts = res.value.map(fromUnits);
+    return res;
+  });
+}
+function catchRitual(matchId, humans) {
+  if (!configured() || !V2) return Promise.resolve({ ok: false, error: "v2 not configured" });
+  return enqueue(async () => {
+    const { rewards } = await chain();
+    const res = await callV2(rewards, "catch_ritual", { match_id: String(matchId).slice(0, 70), humans: Math.min(16, humans) }, { gas: "30" });
+    if (res.ok && res.value != null) res.burned = fromUnits(res.value);
+    return res;
+  });
+}
+function rewardReferral(referralId, wallet) {
+  if (!configured() || !V2) return Promise.resolve({ ok: false, error: "v2 not configured" });
+  return enqueue(async () => {
+    const { rewards } = await chain();
+    await ensureWallet(wallet);
+    const res = await callV2(rewards, "reward_referral", { referral_id: String(referralId).slice(0, 70), account_id: wallet }, { gas: "30" });
+    if (res.ok && res.value != null) res.amount = fromUnits(res.value);
+    return res;
+  });
+}
+// The player's own game wallet (p-<id>.<parent>, held by the server) burns the price.
+function buyPlayPass(wallet) {
+  if (!configured() || !V2) return Promise.resolve({ ok: false, error: "v2 not configured" });
+  return enqueue(async () => {
+    const { near, provider } = await chain();
+    const acct = new near.Account(wallet, provider, KEY);
+    return callV2(acct, "buy_play_pass", {}, { gas: "30", deposit: 1n });
+  });
+}
+let statsCache = { at: 0, data: null };
+async function v2Stats() {
+  if (!configured() || !V2) return null;
+  if (statsCache.data && Date.now() - statsCache.at < 15000) return statsCache.data;
+  const [stats, rules] = await Promise.all([view("get_stats", {}), view("get_rules", {})]);
+  const n = (x) => fromUnits(x);
+  const r = rules.rules;
+  const data = {
+    contract: TOKEN, contractUrl: explorerAccount(TOKEN),
+    supply: n(stats.total_supply), reserve: n(stats.reward_reserve), ritualPool: n(stats.ritual_pool),
+    mintedByPlay: n(stats.minted_by_play), migrated: n(stats.migrated),
+    burned: n(stats.burned_total), burnedByCatches: n(stats.burned_by_catches), burnedByPasses: n(stats.burned_by_passes),
+    caught: stats.saboteurs_caught, passes: stats.play_passes, matches: stats.matches_rewarded,
+    weekMinted: n(stats.week_minted), weekBudget: n(stats.week_budget), weekBurned: n(stats.week_burned),
+    rules: {
+      rankRewards: r.rank_rewards.map(n), finished: n(r.finished_reward),
+      tiers: [r.tier_4plus_bps / 100, r.tier_2to3_bps / 100, r.tier_1_bps / 100],
+      dailyFull: r.daily_full_matches, afterDaily: r.after_daily_bps / 100, passMultiplier: r.play_pass_multiplier,
+      catchBurn: n(r.catch_burn), playPassPrice: n(r.play_pass_price),
+      weeklyBase: n(r.weekly_base_budget), burnToBudget: r.burn_to_budget_bps / 100, referral: n(r.referral_reward),
+    },
+    pendingRules: !!rules.pending, timelockDays: rules.timelock_days,
+  };
+  statsCache = { at: Date.now(), data };
+  return data;
+}
+async function hasPlayPassOnChain(wallet) {
+  try { return !!(await view("has_play_pass", { account_id: wallet })); } catch { return false; }
+}
+
 async function balanceOf(wallet) {
   if (!configured()) return null;
   try { return fromUnits(await view("ft_balance_of", { account_id: wallet })); } catch { return null; }
 }
 
 module.exports = {
-  configured, walletForBot, walletForPlayer, payMatch, balanceOf, ensureWallet,
+  configured, walletForBot, walletForPlayer, payMatch, balanceOf, ensureWallet, V2,
+  reportMatch, catchRitual, rewardReferral, buyPlayPass, v2Stats, hasPlayPassOnChain,
   explorerAccount, explorerTx, TOKEN, TREASURY, REWARDS, BOT_TREASURY, PARENT,
 };

@@ -5367,6 +5367,55 @@ app.get("/saboteur/me", async (req, res) => {
     res.json(await economy.playerSummary(account.accountId));
   } catch (e) { res.status(500).json({ message: "Couldn't load $SABOTEUR right now." }); }
 });
+// [$SABOTEUR v2] Public live panel: supply, burns, catches, weekly budget and
+// the rules - all read from the contract - plus the latest on-chain events.
+app.get("/saboteur/live", async (req, res) => {
+  try {
+    const stats = await saboteurToken.v2Stats();
+    if (!stats) return res.json({ active: false });
+    res.json({ active: true, ...stats, events: await economy.recentEvents(8) });
+  } catch (e) { res.status(500).json({ message: "Couldn't read the token contract right now." }); }
+});
+// [$SABOTEUR v2] Play Pass by burning $SABOTEUR from the player's game wallet.
+const sabPassBusy = new Set();
+app.post("/play-pass/burn-saboteur", async (req, res) => {
+  const account = await resolveAccountFromToken(req.body && req.body.sessionToken);
+  if (!account) return res.status(401).json({ message: "Sign in to get Play Pass." });
+  if (sabPassBusy.has(account.accountId)) return res.status(429).json({ message: "Already working on it - one moment." });
+  sabPassBusy.add(account.accountId);
+  try {
+    const player = await Player.findById(account.accountId);
+    if (!player) return res.status(404).json({ message: "Account not found." });
+    if (player.premiumUntil && player.premiumUntil.getTime() > Date.now()) return res.status(409).json({ message: "You already have Play Pass." });
+    const stats = await saboteurToken.v2Stats();
+    if (!stats) return res.status(503).json({ message: "$SABOTEUR is not available right now." });
+    const price = stats.rules.playPassPrice;
+    const wallet = saboteurToken.walletForPlayer(String(player._id));
+    const bal = (await saboteurToken.balanceOf(wallet)) || 0;
+    if (bal < price) return res.status(402).json({ message: `You need ${Math.ceil(price - bal).toLocaleString()} more $SABOTEUR.`, balance: bal, price });
+    const out = await saboteurToken.buyPlayPass(wallet);
+    if (!out.ok && !/already has Play Pass/.test(out.error || "")) {
+      console.warn("[PLAY PASS] $SABOTEUR burn failed:", out.error);
+      return res.status(502).json({ message: "The burn didn't go through. Your $SABOTEUR is safe - try again in a moment." });
+    }
+    player.premiumUntil = new Date("2099-12-31");
+    player.playPassSource = "saboteur-burn";
+    player.playPassTxHash = out.txHash || player.playPassTxHash || null;
+    player.playPassStartGamesPlayed = player.gamesPlayed || 0;
+    await player.save();
+    await economy.SaboEvent.create({ kind: "pass", name: player.username || player.name || "", amount: price, txHash: out.txHash || null }).catch(() => {});
+    sendInboxMessage(player._id, {
+      title: "Play Pass activated!",
+      body: `You burned ${price.toLocaleString()} $SABOTEUR (testnet) for Play Pass. Premium skins, 24 chat stickers, GIFs, gold name and 2x $SABOTEUR rewards are on.`,
+      nameTag: "Play Pass",
+    });
+    logAdminAction("play-pass-saboteur-burn", { playerId: String(player._id), playerName: player.name, txHash: out.txHash || null, price });
+    res.json({ success: true, hasPlayPass: true, burned: price, txUrl: out.txHash ? saboteurToken.explorerTx(out.txHash) : null });
+  } catch (e) {
+    console.error("[PLAY PASS] burn route error:", e.message);
+    res.status(500).json({ message: "Something went wrong. Your $SABOTEUR is safe - try again in a moment." });
+  } finally { sabPassBusy.delete(account.accountId); }
+});
 // Public: every bot's wallet and track record (for players and judges).
 app.get("/saboteur/bots", async (req, res) => {
   try { res.json(await economy.botsSummary(bots.BOT_NAMES)); }
@@ -9099,6 +9148,7 @@ function finalizeVoting(roomCode) {
       room.players[eliminatedId].ejected = true;
       // [AI BOTS] public record of who was voted out and what they really were (everyone sees the reveal)
       (room.ejections = room.ejections || []).push({ name: room.players[eliminatedId].name, role: room.players[eliminatedId].role, meetingNo: room.meetingNo || 0 });
+      economy.catchBurn({ io, roomCode, room, ejectedId: eliminatedId, hasDb: !!MONGODB_URI }); // [$SABOTEUR v2] catch = burn
       // Voted-out players don't have a "killer" cutscene, but they do
       // still leave a body for the corpse-cleanup logic to track and
       // later clear (see CLEAR_BODY below).
