@@ -4165,7 +4165,7 @@ app.post("/admin/watch-live", requireAdmin, requireFullAdmin, async (req, res) =
 // [REFERRALS] Invite link = nearsaboteur.com/?ref=<username>. A friend who
 // signs up with it and then finishes REFERRAL.matches matches with at
 // least REFERRAL.minHumans real players unlocks the inviter's reward:
-// 1,000 $SABOTEUR (testnet, no value) + 30 points. Only the first
+// 1,000 $SABOTEUR (testnet, no cash value) + 30 points. Only the first
 // REFERRAL.weeklyCap friends per week add points to the weekly Ranks.
 // ============================================================
 const REFERRAL = { matches: 3, minHumans: 2, tokens: 1000, points: 30, weeklyCap: 5 };
@@ -4202,7 +4202,7 @@ async function referralMatchDone(player, meta) {
   const friend = doc.name || doc.username || "Your friend";
   sendInboxMessage(referrer._id, {
     title: `🔓 Referral reward unlocked · ${friend}`,
-    body: `${friend} finished ${REFERRAL.matches} matches.\nYou get ${REFERRAL.tokens.toLocaleString()} $SABOTEUR${givePoints ? ` + ${REFERRAL.points} points` : " (this week's 5-friend points limit is reached, so no extra points)"}.\n$SABOTEUR is a testnet token with no value and nothing is promised about the future.`,
+    body: `${friend} finished ${REFERRAL.matches} matches.\nYou get ${REFERRAL.tokens.toLocaleString()} $SABOTEUR${givePoints ? ` + ${REFERRAL.points} points` : " (this week's 5-friend points limit is reached, so no extra points)"}.\n$SABOTEUR is a testnet token earned by playing. It has no cash value and nothing is promised about its future.`,
   });
   console.log(`[REFERRAL] ${referrer._id} unlocked by ${doc._id} (points: ${givePoints})`);
 }

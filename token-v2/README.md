@@ -2,7 +2,7 @@
 
 `sabo.saboteur.testnet` (NEAR testnet), NEP-141 + NEP-148, `near-sdk 5.26.1`.
 
-**$SABOTEUR is a testnet token. It has no value, it can't be bought or cashed out, and nothing is promised about its future.**
+**$SABOTEUR is a testnet token you earn by playing. You can burn it for in-game items like Play Pass, but it has no cash value: it can't be bought, sold, transferred or cashed out, and nothing is promised about its future.**
 
 ## The mechanic: catch = burn
 

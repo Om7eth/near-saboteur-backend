@@ -12,7 +12,8 @@
 //!   * Every rule is public (`get_rules`). The owner can only change rules with a
 //!     7-day public timelock, inside hard bounds checked here.
 //!
-//! Testnet token. It has no value and nothing is promised about its future.
+//! Testnet token earned by playing. It can be burned for in-game items, but it has
+//! no cash value (it can't be bought, sold or cashed out) and nothing is promised.
 
 use near_contract_standards::fungible_token::core::FungibleTokenCore;
 use near_contract_standards::fungible_token::events::{FtBurn, FtMint};
