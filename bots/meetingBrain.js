@@ -20,7 +20,7 @@
 //                       model answers right away instead of reasoning first
 //   NEAR_AI_BASE_URL  - default "https://cloud-api.near.ai/v1"
 //   NEAR_AI_DAILY_BUDGET_USD    - default 1 (UTC day); then rule-based lines
-//   NEAR_AI_MAX_CALLS_PER_MEETING - default 8 per meeting (whole room)
+//   NEAR_AI_MAX_CALLS_PER_MEETING - default 30 per meeting (whole room)
 //
 // Cost control: AI is used where it matters most (a bot with news
 // opening the discussion, and replies when someone names or questions a
@@ -43,7 +43,7 @@ const BASE_URL = (process.env.NEAR_AI_BASE_URL || "https://cloud-api.near.ai/v1"
 const AI_TIMEOUT_MS = 9000;
 const SLOW_REPLY_FILLER_MS = 5000;
 const DAILY_BUDGET_USD = Number(process.env.NEAR_AI_DAILY_BUDGET_USD || 1);
-const MAX_AI_CALLS_PER_MEETING = Number(process.env.NEAR_AI_MAX_CALLS_PER_MEETING || 8);
+const MAX_AI_CALLS_PER_MEETING = Number(process.env.NEAR_AI_MAX_CALLS_PER_MEETING || 30);
 // $ per 1M tokens; refreshed from NEAR AI's public model list at startup.
 let price = { input: 0.17, output: 1.1 };
 const stats = { day: "", spendUsd: 0, calls: 0, failures: 0, fallbacks: 0, budgetHitLogged: false };
@@ -66,7 +66,7 @@ if (API_KEY) {
     }
   }).catch(() => { /* keep defaults */ });
 }
-const MAX_MSGS_PER_BOT = 4;
+const MAX_MSGS_PER_BOT = 12; // safety only - a bot keeps answering while people talk to it
 const MIN_GAP_BETWEEN_BOT_MSGS_MS = 4000; // [HUMAN PACE] bots don't fire back-to-back
 // [HUMAN PACE] a person reads (~2-4s), thinks, then types ~5 chars/sec on a phone
 const humanTypingMs = (text) => Math.max(3500, Math.min(16000, 1800 + String(text || '').length * 170));
@@ -646,7 +646,7 @@ function tick(roomCode, room, now, api) {
       if (bs.busy || bs.pendingSay || !bs.nextActAt || now < bs.nextActAt) continue;
       // @ only mode (or the voting window): only answer when tagged.
       if ((mentionOnly || meeting.stage === "voting") && bs.purpose !== "reply") { bs.nextActAt = 0; continue; }
-      if (bs.said.length >= MAX_MSGS_PER_BOT || (bs.said.length >= (calmMeeting ? 1 : 2) && bs.purpose !== "reply")) { bs.nextActAt = 0; continue; }
+      if (bs.said.length >= MAX_MSGS_PER_BOT || (bs.said.length >= (calmMeeting ? 2 : 4) && bs.purpose !== "reply")) { bs.nextActAt = 0; continue; }
       bs.busy = true;
       bs.nextActAt = 0;
       const purpose = bs.purpose || "chime";
