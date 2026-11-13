@@ -86,6 +86,7 @@ const winnerSchema = new mongoose.Schema({
   status: { type: String, default: "queued" },
   idem: String,
   publicSource: { type: Boolean, default: null }, // pay from the legacy public balance
+  autoRetried: { type: Boolean, default: false },
   correlationId: String,
   txHash: String,
   error: String,
@@ -819,8 +820,30 @@ async function retryWinner(id, rank) {
   setImmediate(tick);
 }
 
+// Payments refused only because the API moved to confidential balances
+// (fixed by paying from the public balance) are retried by themselves, once.
+async function autoRetryRefused() {
+  const since = new Date(Date.now() - 14 * 24 * 3600 * 1000);
+  const list = await Batch.find({ weekEnd: { $gte: since }, "winners.status": "failed" });
+  for (const b of list) {
+    let changed = false;
+    for (const w of b.winners) {
+      if (w.status === "failed" && !w.idem && !w.autoRetried && w.error === errText({ code: "policy_action_denied" })) {
+        w.status = "queued"; w.error = null; w.autoRetried = true; changed = true;
+      }
+    }
+    if (changed) {
+      if (b.status === "done") b.status = "sending";
+      b.markModified("winners");
+      await b.save();
+      console.log(`[WEEKLY] auto-retrying refused payments for ${b.label}`);
+    }
+  }
+}
+
 function init(deps) {
   D = deps;
+  setTimeout(() => autoRetryRefused().then(tick).catch((e) => console.error("[WEEKLY] auto-retry", e.message)), 20 * 1000);
   setInterval(tick, 30 * 1000);
   setTimeout(tick, 15 * 1000);
 }
