@@ -7567,11 +7567,12 @@ function withJoinButton(payload) {
   const kb = payload && payload.reply_markup && payload.reply_markup.inline_keyboard;
   if (!Array.isArray(kb)) return payload;
   if (kb.some((row) => row.some((b) => b && b.url === TELEGRAM_GROUP_URL))) return payload;
-  return { ...payload, reply_markup: { ...payload.reply_markup, inline_keyboard: [...kb, [{ text: "💬 Join the NEAR Saboteur group", url: TELEGRAM_GROUP_URL }]] } };
+  return payload; // the group link now lives in the footer line (fewer buttons)
 }
 // Every bot message also ends with the website and the X account (plain
 // text links, no extra buttons).
-const TG_FOOTER = `\n\n🌐 <a href="https://nearsaboteur.com">nearsaboteur.com</a> · 𝕏 <a href="https://x.com/NearSaboteur">@NearSaboteur</a>`;
+const TG_GROUP_HANDLE = (TELEGRAM_GROUP_URL.match(/t\.me\/([A-Za-z0-9_]+)\/?$/) || [])[1];
+const TG_FOOTER = `\n\n🌐 <a href="https://nearsaboteur.com">nearsaboteur.com</a> · 𝕏 <a href="https://x.com/NearSaboteur">@NearSaboteur</a> · 💬 <a href="${TELEGRAM_GROUP_URL}">${TG_GROUP_HANDLE ? "@" + TG_GROUP_HANDLE : "Join the group"}</a>`;
 function withFooter(method, payload) {
   const add = (t) => (typeof t === "string" && !t.includes("x.com/NearSaboteur") ? t + TG_FOOTER : t);
   if (method === "sendMessage" || method === "editMessageText") return { link_preview_options: { is_disabled: true }, ...payload, text: add(payload.text) };
@@ -7796,7 +7797,7 @@ async function tgAnnounce(ev) {
     const lines = (ev.winners || []).map((w) => `${medal[w.rank - 1] || "#" + w.rank} <b>${escapeTelegramHtml(w.name || "Player")}</b> — ${w.amountNear} NEAR${w.status === "held" ? " (waiting for a wallet)" : ""}`).join("\n");
     text = `🏆 <b>Weekly prizes paid</b>${ev.label ? ` · ${escapeTelegramHtml(ev.label)}` : ""}\n<blockquote>${lines}</blockquote>Paid automatically by the Saboteur Agent on NEAR Intents.${ev.txHash ? `\n🔗 <a href="https://nearblocks.io/txns/${encodeURIComponent(ev.txHash)}">Proof on NEAR</a>` : ""}\nA new week has started — climb the Ranks! 🚀`;
   } else return;
-  const keyboard = { inline_keyboard: [[{ text: "🏆 Open the Ranks", url: TG_SITE }], [{ text: "🎮 Play now", url: `https://t.me/${TELEGRAM_BOT_USERNAME}?startapp=play` }]] };
+  const keyboard = { inline_keyboard: [[{ text: "🏆 Ranks", url: TG_SITE }, { text: "🎮 Play now", url: `https://t.me/${TELEGRAM_BOT_USERNAME}?startapp=play` }]] };
   const photo = ev.photo ? tgBannerUrl(ev.photo) : null;
   const payload = { chat_id: TELEGRAM_CHAT_ID, message_thread_id: TELEGRAM_ANNOUNCE_TOPIC_ID, parse_mode: "HTML", reply_markup: keyboard };
   const sent = photo ? await tgCall("sendPhoto", { ...payload, photo, caption: text }) : await tgCall("sendMessage", { ...payload, text, link_preview_options: { is_disabled: true } });
