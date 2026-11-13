@@ -69,3 +69,28 @@ test("no deaths yet: bots never vote anyone out", async () => {
   const out = await MB._internal.think(r, "T", "b1", [], { said: ["x"] }, now, { aiCalls: 0, used: new Set(), botLines: [] }, "vote");
   assert.strictEqual(out.vote, "skip");
 });
+
+// [CROWD READ] most humans name the same player -> a skipping bot follows the room
+const crowdRoom = (msgs, extra = {}) => {
+  const r = room({ h2: { name: "Ria", role: "crewmate", alive: true }, h3: { name: "Sam", role: "crewmate", alive: true }, h4: { name: "Zed", role: "crewmate", alive: true }, ...extra });
+  r.meeting.messages = msgs.map(([senderId, text]) => ({ senderId, text }));
+  return r;
+};
+test("bots follow when most humans accuse the same player", () => {
+  const r = crowdRoom([["h2", "Beacon sabo hai pakka"], ["h3", "haan Beacon ko vote karo"], ["h4", "ok"]]);
+  const c = MB._internal.crowdPick(r, "b1", [body], now);
+  assert.strictEqual(c && c.name, "Beacon");
+});
+test("one human voice is not a crowd", () => {
+  const r = crowdRoom([["h2", "Beacon sus"], ["h3", "pata nahi"], ["h4", "skip"]]);
+  assert.strictEqual(MB._internal.crowdPick(r, "b1", [body], now), null);
+});
+test("a bot that saw the accused elsewhere does not follow the crowd", () => {
+  const r = crowdRoom([["h2", "Beacon sabo hai"], ["h3", "Beacon ko vote"]]);
+  const mem = [body, { kind: "saw", name: "Beacon", where: "Cafeteria", t: now - 5000 }];
+  assert.strictEqual(MB._internal.crowdPick(r, "b1", mem, now), null);
+});
+test("defenders cancel the crowd", () => {
+  const r = crowdRoom([["h2", "Beacon sabo hai"], ["h3", "Beacon ko vote"], ["h4", "Beacon innocent hai, mere saath tha"]]);
+  assert.strictEqual(MB._internal.crowdPick(r, "b1", [body], now), null);
+});

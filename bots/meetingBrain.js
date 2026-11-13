@@ -705,10 +705,60 @@ function tick(roomCode, room, now, api) {
         continue;
       }
       bs.voted = true;
+      // [CROWD READ] Undecided (skip)? Listen to the room like a person would.
+      if (bs.vote === "skip" && Object.values(room.players).some((p) => p.alive === false && !p.spectator)) {
+        const crowd = crowdPick(room, id, api.memoryOf(id), now);
+        const me = room.players[id];
+        if (crowd && me) {
+          const t = room.players[crowd.id];
+          const go = me.role === "saboteur"
+            ? (t.role === "saboteur" ? chance(0.35) : crowd.id !== id && chance(0.9)) // blend in; sometimes even drop a partner
+            : chance(0.85);
+          if (go && crowd.id !== id) { bs.vote = crowd.id; console.log(`[BOTS] ${me.name} follows the room: votes ${crowd.name} (${crowd.accusers} humans)`); }
+        }
+      }
       const target = bs.vote !== "skip" && room.players[bs.vote] && room.players[bs.vote].alive !== false ? bs.vote : "skip";
       api.castMeetingVote(roomCode, id, target, target !== "skip" && shouldBack(room, id, target, api.memoryOf(id)));
     }
   }
+}
+
+// [CROWD READ] Real players listen to the room. If most of the living
+// humans name the same person this meeting and the bot's own memory
+// doesn't clear that person, the bot goes with them instead of skipping.
+const DEFEND_RX = /\b(innocent|clear(ed)?|safe|trust|with me|mere saath|mere sath|saath tha|sath tha|nahi hai|nhi hai|not (him|her|them|sus)|not the sab\w*|wo nahi|vo nahi)\b/i;
+const CROWD_RX = /\b(sabo\w*|impostor|imposter|sus|kill(ed|er)?|maara|mara|vote|eject|nikalo|nikaal\w*|pakka|lying|liar|jhooth\w*|jhoota|vent(ed)?|fake)\b|shak/i;
+function crowdPick(room, botId, memory, now = Date.now()) {
+  const meeting = room.meeting;
+  const me = room.players[botId];
+  if (!meeting || !me) return null;
+  const alive = Object.entries(room.players).filter(([id, p]) => p.alive !== false && !p.spectator && id !== botId);
+  const humans = alive.filter(([, p]) => !p.isBot);
+  const acc = {}, def = {};
+  for (const m of meeting.messages || []) {
+    const sp = room.players[m.senderId];
+    if (!sp || sp.isBot || sp.alive === false || !m.text) continue;
+    for (const [id, p] of alive) {
+      if (id === m.senderId || !nameRx(p.name).test(m.text)) continue;
+      if (DEFEND_RX.test(m.text) || NEGATED_SUS_RX.test(m.text)) { (def[id] = def[id] || new Set()).add(m.senderId); continue; }
+      if (CROWD_RX.test(m.text)) (acc[id] = acc[id] || new Set()).add(m.senderId);
+    }
+  }
+  const ranked = Object.entries(acc).map(([id, set]) => {
+    for (const d of def[id] || []) set.delete(d); // someone who changed their mind / defends
+    return [id, set.size, (def[id] || new Set()).size];
+  }).sort((a, b) => b[1] - a[1]);
+  const top = ranked[0];
+  if (!top) return null;
+  const [id, n, d] = top;
+  const others = humans.filter(([hid]) => hid !== id).length; // humans who could have accused
+  const need = Math.max(2, Math.ceil(others * 0.5));
+  if (n < need || n <= d * 2 || (ranked[1] && ranked[1][1] === n)) return null;
+  // My own memory clears them? (saw them in another room right before the body was found)
+  const name = room.players[id].name;
+  const body = [...(memory || [])].reverse().find((m) => m.kind === "body");
+  if (body && (memory || []).some((m) => m.kind === "saw" && m.name === name && body.where && m.where && m.where !== body.where && m.t <= body.t && body.t - m.t <= 15000)) return null;
+  return { id, name, accusers: n };
 }
 
 // A chat message was posted (by anyone). Bots that were named or asked
@@ -788,4 +838,4 @@ function aiStatus() {
   return API_KEY ? `NEAR AI Cloud (${MODEL})` : "rule-based fallback (set NEAR_AI_API_KEY to use NEAR AI Cloud)";
 }
 
-module.exports = { tick, onChat, aiStatus, aiStats, detectLanguage, learnFromMatch, _internal: { fallbackThink, buildContext, systemPrompt, userPrompt, memoryLines, think } };
+module.exports = { tick, onChat, aiStatus, aiStats, detectLanguage, learnFromMatch, _internal: { crowdPick, fallbackThink, buildContext, systemPrompt, userPrompt, memoryLines, think } };
