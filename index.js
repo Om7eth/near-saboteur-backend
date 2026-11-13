@@ -9221,6 +9221,21 @@ function finalizeVoting(roomCode) {
     io.to(eliminatedId).emit("ghostChatBacklog", { messages: room.ghostChat || [] });
   }
 
+  // [HALL RETURN FIX] Everyone goes back to the Assembly Hall after a
+  // meeting. The client moved itself there, but the SERVER kept the old
+  // spot - so a player whose connection blinked during the results screen
+  // was restored to where they stood before the meeting. Same spawn
+  // index as the client (order of room.players) and the bots.
+  {
+    const order = Object.keys(room.players);
+    order.forEach((id, i) => {
+      const p = room.players[id];
+      if (!p || p.isBot) return; // bots respawn in botManager
+      const sp = bots.spawnPointPx(i);
+      p.x = sp.x; p.y = sp.y;
+    });
+  }
+
   io.to(roomCode).emit("votingResult", {
     eliminatedId,
     eliminatedName: eliminatedId ? room.players[eliminatedId]?.name : null,
