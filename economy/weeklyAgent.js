@@ -87,6 +87,7 @@ const winnerSchema = new mongoose.Schema({
   idem: String,
   publicSource: { type: Boolean, default: null }, // pay from the legacy public balance
   autoRetried: { type: Boolean, default: false },
+  proofAfter: Date,
   correlationId: String,
   txHash: String,
   error: String,
@@ -104,6 +105,7 @@ const batchSchema = new mongoose.Schema({
   nearPrice: Number,
   winners: [winnerSchema],
   announced: { type: Boolean, default: false },
+  tgPosted: { type: Boolean, default: false },
   cancelledAt: Date,
   sentAt: Date,
   createdAt: { type: Date, default: Date.now, index: true },
@@ -562,13 +564,31 @@ async function sendWinner(s, batch, w) {
   }
 }
 
+// The API's status no longer carries a NEAR tx hash for withdrawals. Find the
+// on-chain proof ourselves: the receipt from intents.near to the winner's
+// wallet, shortly after the payment was created.
+async function findProofTx(wallet, afterMs) {
+  try {
+    const r = await fetch(`https://api.nearblocks.io/v1/account/${encodeURIComponent(wallet)}/receipts?per_page=25`, { signal: AbortSignal.timeout(15000) });
+    if (!r.ok) return null;
+    const d = await r.json();
+    const hit = (d.txns || [])
+      .filter((t) => t.predecessor_account_id === "intents.near" && t.receiver_account_id === wallet)
+      .map((t) => ({ hash: t.transaction_hash, ms: Number(BigInt(t.block_timestamp || 0) / 1000000n) }))
+      .filter((t) => t.ms >= afterMs - 60000 && t.ms <= afterMs + 6 * 3600 * 1000)
+      .sort((a, b) => a.ms - b.ms)[0];
+    return hit ? hit.hash : null;
+  } catch { return null; }
+}
+
 async function pollWinner(batch, w) {
   const st = await api("GET", "/v1/status", { query: { correlation_id: w.correlationId, wait_ms: 1000 } }).catch(() => null);
   if (!st) return;
   if (st.status === "SUCCESS") {
     w.status = "paid";
     w.paidAt = new Date();
-    w.txHash = txOf(st);
+    w.txHash = txOf(st) || (await findProofTx(w.wallet, new Date(st.created_at || Date.now()).getTime()));
+    w.proofAfter = new Date(st.created_at || Date.now());
     w.error = null;
     D.sendInboxMessage(w.playerId, {
       title: `Your prize arrived · ${w.amountNear} NEAR`,
@@ -582,6 +602,42 @@ async function pollWinner(batch, w) {
   } else if (st.status === "NEEDS_REVIEW") {
     w.status = "failed";
     w.error = "Needs review at NEAR Intents: " + (st.failure_code || "");
+  }
+}
+
+async function tgPaid(batch) {
+  if (!D.tgAnnounce) return false;
+  const paid = batch.winners.filter((w) => w.status === "paid");
+  return D.tgAnnounce({ kind: "paid", photo: "weekly", winners: batch.winners.map((w) => ({ rank: w.rank, name: w.username || w.name, amountNear: w.amountNear, status: w.status })), label: batch.label, txHash: (paid.find((w) => w.txHash) || {}).txHash || null }).then((x) => x === true).catch(() => false);
+}
+
+// Paid payments with no proof yet: look them up on chain, fix the news post,
+// and post to Telegram if that didn't happen (e.g. Telegram was off).
+async function backfillProofs() {
+  const since = new Date(Date.now() - 21 * 24 * 3600 * 1000);
+  const list = await Batch.find({ weekEnd: { $gte: since }, "winners.status": "paid" });
+  for (const b of list) {
+    let changed = false;
+    for (const w of b.winners) {
+      if (w.status !== "paid" || w.txHash || !w.wallet) continue;
+      let after = w.proofAfter ? w.proofAfter.getTime() : null;
+      if (!after && w.correlationId) {
+        const st = await api("GET", "/v1/status", { query: { correlation_id: w.correlationId } }).catch(() => null);
+        after = st && st.created_at ? new Date(st.created_at).getTime() : null;
+      }
+      const tx = after && (await findProofTx(w.wallet, after));
+      if (tx) { w.txHash = tx; changed = true; }
+    }
+    const first = b.winners.find((w) => w.status === "paid" && w.txHash);
+    if (changed && b.announced && first) {
+      await D.Announcement.updateOne(
+        { title: `Weekly prizes paid · ${b.label}`, body: { $not: /nearblocks/ } },
+        [{ $set: { body: { $concat: ["$body", ` See proofs: https://nearblocks.io/txns/${first.txHash}`] } } }]
+      ).catch(() => {});
+    }
+    const fresh = b.sentAt && Date.now() - new Date(b.sentAt).getTime() < 3 * 24 * 3600 * 1000; // never post stale weeks
+    if (b.announced && !b.tgPosted && first && fresh) { b.tgPosted = await tgPaid(b); changed = changed || b.tgPosted; }
+    if (changed) { b.markModified("winners"); await b.save(); }
   }
 }
 
@@ -600,7 +656,7 @@ async function announceIfDone(batch) {
     nameTag: "NEAR Saboteur",
   }).catch((e) => console.error("[WEEKLY AGENT] announcement failed:", e.message));
   // [TELEGRAM] same news in the official group's Announcements topic
-  if (D.tgAnnounce) D.tgAnnounce({ kind: "paid", photo: "weekly", winners: batch.winners.map((w) => ({ rank: w.rank, name: w.username || w.name, amountNear: w.amountNear, status: w.status })), label: batch.label, txHash: paid[0].txHash || null }).catch(() => {});
+  batch.tgPosted = await tgPaid(batch);
   batch.announced = true;
 }
 
@@ -844,6 +900,9 @@ async function autoRetryRefused() {
 function init(deps) {
   D = deps;
   setTimeout(() => autoRetryRefused().then(tick).catch((e) => console.error("[WEEKLY] auto-retry", e.message)), 20 * 1000);
+  const bf = () => backfillProofs().catch((e) => console.error("[WEEKLY] proofs", e.message));
+  setTimeout(bf, 60 * 1000);
+  setInterval(bf, 30 * 60 * 1000);
   setInterval(tick, 30 * 1000);
   setTimeout(tick, 15 * 1000);
 }

@@ -7781,7 +7781,7 @@ async function markRoomMessageClosedForever(room) {
 // paid. When prizes are off, nothing is posted on the weekend.
 const TELEGRAM_ANNOUNCE_TOPIC_ID = process.env.TELEGRAM_ANNOUNCE_TOPIC_ID ? Number(process.env.TELEGRAM_ANNOUNCE_TOPIC_ID) : 4;
 async function tgAnnounce(ev) {
-  if (!TELEGRAM_API || !ev) return;
+  if (!TELEGRAM_API || !ev) return false;
   const usd = (n) => `$${Math.round(Number(n || 0) * 100) / 100}`;
   const medal = ["🥇", "🥈", "🥉"];
   let text = "";
@@ -7799,8 +7799,8 @@ async function tgAnnounce(ev) {
   const keyboard = { inline_keyboard: [[{ text: "🏆 Open the Ranks", url: TG_SITE }], [{ text: "🎮 Play now", url: `https://t.me/${TELEGRAM_BOT_USERNAME}?startapp=play` }]] };
   const photo = ev.photo ? tgBannerUrl(ev.photo) : null;
   const payload = { chat_id: TELEGRAM_CHAT_ID, message_thread_id: TELEGRAM_ANNOUNCE_TOPIC_ID, parse_mode: "HTML", reply_markup: keyboard };
-  if (photo) await tgCall("sendPhoto", { ...payload, photo, caption: text });
-  else await tgCall("sendMessage", { ...payload, text, link_preview_options: { is_disabled: true } });
+  const sent = photo ? await tgCall("sendPhoto", { ...payload, photo, caption: text }) : await tgCall("sendMessage", { ...payload, text, link_preview_options: { is_disabled: true } });
+  return !!sent;
 }
 
 // ---------------- [TELEGRAM v2] Bot commands ----------------
