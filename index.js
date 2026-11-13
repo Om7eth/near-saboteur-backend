@@ -11564,10 +11564,21 @@ io.on("connection", (socket) => {
     if (!room || !room.players[socket.id]) return;
     if (mode !== "auto" && mode !== "mention") return;
     if ((room.botChatMode || "auto") === mode) return;
+    // Spam guard: one flip per player every 3 s.
+    const nowMs = Date.now();
+    socket.data.botModeAt = socket.data.botModeAt || 0;
+    if (nowMs - socket.data.botModeAt < 3000) return socket.emit("botChatModeChanged", { mode: room.botChatMode || "auto", silent: true });
+    socket.data.botModeAt = nowMs;
     room.botChatMode = mode;
     const byName = room.players[socket.id].name;
     const text = `${byName} set bot chat to ${mode === "auto" ? "Auto" : "@ only"}`;
-    if (room.meeting) pushMatchChat(room, { kind: "sys", text, timestamp: Date.now() });
+    if (room.meeting) {
+      // Keep ONE line: if the last chat line is also a bot-mode line, replace it.
+      const mc = room.matchChat || [];
+      const last = mc[mc.length - 1];
+      if (last && last.kind === "sys" && last.botMode) mc.pop();
+      pushMatchChat(room, { kind: "sys", text, botMode: true, timestamp: nowMs });
+    }
     io.to(roomCode).emit("botChatModeChanged", { mode, byName, text });
   });
 

@@ -68,7 +68,7 @@ const stateSchema = new mongoose.Schema({
     error: String,
   },
   deposit: { address: String, memo: String, minAmount: String, expiresAt: Date, correlationId: String },
-  ownerWithdraw: { idem: String, correlationId: String, amountRaw: String, status: String, txHash: String, error: String, at: Date },
+  ownerWithdraw: { idem: String, correlationId: String, amountRaw: String, status: String, txHash: String, error: String, at: Date, publicSource: Boolean },
 }, { minimize: false });
 const State = mongoose.models.WeeklyAgentState || mongoose.model("WeeklyAgentState", stateSchema);
 
@@ -85,6 +85,7 @@ const winnerSchema = new mongoose.Schema({
   // queued (waiting for the timer) | held (no wallet yet) | sending | paid | failed | expired | cancelled
   status: { type: String, default: "queued" },
   idem: String,
+  publicSource: { type: Boolean, default: null }, // pay from the legacy public balance
   correlationId: String,
   txHash: String,
   error: String,
@@ -293,7 +294,7 @@ function prizesFor(prizeUsd, split) {
 function buildPolicy(mode, prizeUsd, price) {
   if (mode === "withdraw_to_owner") {
     return {
-      frozen: false, actions: ["withdraw"], confidential: false, owner_approval: false,
+      frozen: false, actions: ["withdraw"], confidential: true, owner_approval: false,
       assets: [WNEAR], limits: {}, max_actions_per_hour: null,
       destinations: { mode: "only", list: [{ action: "withdraw", chain: "near", address: OWNER, memo: null }] },
       budget: { daily_usd: null, weekly_usd: null, monthly_usd: null }, timelock_ms: 0,
@@ -302,7 +303,7 @@ function buildPolicy(mode, prizeUsd, price) {
   const weeklyCap = Math.max(15, Math.ceil(prizeUsd * 1.5));
   const perTxNear = Math.max(3, Math.ceil((prizeUsd * 0.5 * 2) / price)); // 2x the 1st prize, for price moves
   return {
-    frozen: false, actions: ["withdraw"], confidential: false, owner_approval: false,
+    frozen: false, actions: ["withdraw"], confidential: true, owner_approval: false,
     assets: [WNEAR], limits: { per_transaction: { [WNEAR]: nearToRaw(perTxNear) } }, max_actions_per_hour: 12,
     destinations: { mode: "any", list: [] },
     budget: { daily_usd: null, weekly_usd: String(weeklyCap), monthly_usd: null }, timelock_ms: 0,
@@ -417,6 +418,26 @@ async function depositAddress() {
   return s.deposit;
 }
 
+// The Intents API now keeps an agent's funds in two places: the new
+// confidential balance (default) and the legacy public balance, where our
+// agent's wNEAR sits. An agent whose stored policy has confidential off can
+// only pay from the public one (withdraw with confidential:false), so read
+// both and pay from whichever holds enough.
+async function wnearBalances(agentId) {
+  const one = (src) => api("GET", `/v1/agents/${agentId}/balances${src === "public" ? "?source=public" : ""}`)
+    .then((b) => (b.balances || []).find((x) => x.asset_id === WNEAR) || null).catch(() => null);
+  const [pub, conf] = await Promise.all([one("public"), one("confidential")]);
+  return { pub, conf };
+}
+const rawOf = (b) => BigInt((b && b.available_raw) || "0");
+async function sourceFor(agentId, amountRaw) {
+  const { pub, conf } = await wnearBalances(agentId);
+  const need = BigInt(amountRaw);
+  if (rawOf(pub) >= need) return { confidential: false };
+  if (rawOf(conf) >= need) return {};
+  return { confidential: rawOf(pub) >= rawOf(conf) ? false : undefined };
+}
+
 // Withdraw everything to saboteur.near (needs the withdraw-to-owner rules).
 async function withdrawAllToOwner() {
   const s = await getState();
@@ -424,11 +445,11 @@ async function withdrawAllToOwner() {
   if (s.mode !== "withdraw_to_owner") throw new Error("Sign 'Withdraw to saboteur.near' first.");
   const ow = s.ownerWithdraw || {};
   if (ow.idem && ow.status && !TERMINAL.has(ow.status)) return ow; // one already in flight: never start a second
-  const bal = await api("GET", `/v1/agents/${s.agentId}/balances`);
-  const b = (bal.balances || []).find((x) => x.asset_id === WNEAR);
-  const raw = b && b.available_raw;
+  const { pub, conf } = await wnearBalances(s.agentId);
+  const usePub = rawOf(pub) >= rawOf(conf);
+  const raw = usePub ? pub && pub.available_raw : conf && conf.available_raw;
   if (!raw || BigInt(raw) <= 0n) throw new Error("Nothing to withdraw.");
-  s.ownerWithdraw = { idem: crypto.randomUUID(), amountRaw: raw, status: "SENDING", at: new Date() };
+  s.ownerWithdraw = { idem: crypto.randomUUID(), amountRaw: raw, status: "SENDING", at: new Date(), publicSource: usePub };
   s.markModified("ownerWithdraw");
   await s.save(); // key saved BEFORE sending
   await sendOwnerWithdraw(s);
@@ -439,7 +460,7 @@ async function sendOwnerWithdraw(s) {
   try {
     const r = await api("POST", `/v1/agents/${s.agentId}/withdraw`, {
       grant: decrypt(s.grantEnc), idem: ow.idem,
-      body: { asset: WNEAR, amount: ow.amountRaw, chain: "near", recipient: OWNER },
+      body: { asset: WNEAR, amount: ow.amountRaw, chain: "near", recipient: OWNER, ...(ow.publicSource ? { confidential: false } : {}) },
     });
     ow.correlationId = r.correlation_id;
     ow.status = r.status || "PROCESSING";
@@ -516,9 +537,14 @@ async function sendWinner(s, batch, w) {
     await batch.save(); // key saved BEFORE sending
   }
   try {
+    if (w.publicSource == null) {
+      const src = await sourceFor(s.agentId, w.amountRaw);
+      w.publicSource = src.confidential === false;
+      await batch.save(); // same key must replay the same request
+    }
     const r = await api("POST", `/v1/agents/${s.agentId}/withdraw`, {
       grant: decrypt(s.grantEnc), idem: w.idem,
-      body: { asset: WNEAR, amount: w.amountRaw, chain: "near", recipient: wallet },
+      body: { asset: WNEAR, amount: w.amountRaw, chain: "near", recipient: wallet, ...(w.publicSource ? { confidential: false } : {}) },
     });
     w.correlationId = r.correlation_id;
     w.status = "sending";
@@ -530,6 +556,7 @@ async function sendWinner(s, batch, w) {
       w.status = "failed";
       w.error = errText(e);
       w.idem = null; // proven refusal: nothing was sent, a retry needs a new key
+      w.publicSource = null;
     }
   }
 }
@@ -646,7 +673,7 @@ async function adminView() {
       [agent, policy, balance] = await cached("agent:" + s.agentId, 20000, () => Promise.all([
         api("GET", `/v1/agents/${s.agentId}`),
         api("GET", `/v1/agents/${s.agentId}/policy`).catch(() => null),
-        api("GET", `/v1/agents/${s.agentId}/balances`).then((b) => (b.balances || []).find((x) => x.asset_id === WNEAR) || null).catch(() => null),
+        wnearBalances(s.agentId).then(({ pub, conf }) => (rawOf(pub) >= rawOf(conf) ? pub : conf)),
       ]));
     } catch (e) { agentError = errText(e); }
     const nearId = agent && agent.wallet && agent.wallet.near_account_id;
