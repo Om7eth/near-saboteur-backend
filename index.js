@@ -7572,7 +7572,7 @@ function withJoinButton(payload) {
 // Every bot message also ends with the website and the X account (plain
 // text links, no extra buttons).
 const TG_GROUP_HANDLE = (TELEGRAM_GROUP_URL.match(/t\.me\/([A-Za-z0-9_]+)\/?$/) || [])[1];
-const TG_FOOTER = `\n\n🌐 <a href="https://nearsaboteur.com">nearsaboteur.com</a> · 𝕏 <a href="https://x.com/NearSaboteur">@NearSaboteur</a> · 💬 <a href="${TELEGRAM_GROUP_URL}">${TG_GROUP_HANDLE ? "@" + TG_GROUP_HANDLE : "Join the group"}</a>`;
+const TG_FOOTER = `\n\n🌐 <a href="https://nearsaboteur.com">nearsaboteur.com</a> · 𝕏 <a href="https://x.com/NearSaboteur">x.com/NearSaboteur</a> · 💬 <a href="${TELEGRAM_GROUP_URL}">${TG_GROUP_HANDLE ? "@" + TG_GROUP_HANDLE : "Join the group"}</a>`;
 function withFooter(method, payload) {
   const add = (t) => (typeof t === "string" && !t.includes("x.com/NearSaboteur") ? t + TG_FOOTER : t);
   if (method === "sendMessage" || method === "editMessageText") return { link_preview_options: { is_disabled: true }, ...payload, text: add(payload.text) };
